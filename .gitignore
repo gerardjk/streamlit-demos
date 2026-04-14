@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+.streamlit/secrets.toml
+.DS_Store
+
+# Solar ephemeris binary data — regenerate with solar/scripts/generate_ephemeris.py
+solar/data/*.bin
+solar/data/*.json
+
+# Skyfield kernel cache
+*.bsp
