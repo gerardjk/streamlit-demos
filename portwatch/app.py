@@ -8,6 +8,7 @@ Plotly click events.
 """
 
 import json
+import time
 import urllib.request
 from datetime import date, timedelta
 from pathlib import Path
@@ -16,6 +17,18 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+
+
+def _lighten(hex_color: str, amount: float = 0.55) -> str:
+    """Blend a hex colour toward white by `amount` (0–1). 0 = original, 1 = white.
+    Used for the per-country halo rings behind each port bubble — a light
+    tint of the country's own colour reads better than hard white."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    r = int(r + (255 - r) * amount)
+    g = int(g + (255 - g) * amount)
+    b = int(b + (255 - b) * amount)
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 DATA_DIR = Path(__file__).parent / "data"
 DATA_PATH = DATA_DIR / "chokepoint_transits.csv"
@@ -113,6 +126,51 @@ def load_coastline_geojson() -> dict:
         return json.loads(local.read_text())
     except Exception:
         return {"type": "FeatureCollection", "features": []}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_country_polygons() -> dict[str, dict]:
+    """Natural Earth 50m country polygons, keyed by country name.
+
+    Returns a dict like {"Iran": <FeatureCollection>, ...} containing only the
+    Gulf-region countries we actually shade on the map. Splitting per-country
+    at load time lets us add one mapbox fill layer per country with its own
+    colour — the alternative (one big geojson + feature-state expressions)
+    is more complex and no faster for 8 features."""
+    local = DATA_DIR / "ne_50m_admin_0_countries.geojson"
+    if not local.exists():
+        url = (
+            "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/"
+            "master/geojson/ne_50m_admin_0_countries.geojson"
+        )
+        try:
+            with urllib.request.urlopen(url, timeout=15) as resp:
+                local.write_bytes(resp.read())
+        except Exception:
+            return {}
+    try:
+        full = json.loads(local.read_text())
+    except Exception:
+        return {}
+    # Natural Earth stores the country name in properties.NAME or ADMIN —
+    # different names for the same countries in different NE vintages, so
+    # we check both and also use a few known aliases.
+    wanted = set(COUNTRY_COLORS.keys())
+    aliases = {
+        "United Arab Emirates": {"United Arab Emirates", "UAE"},
+        "Saudi Arabia": {"Saudi Arabia"},
+    }
+    out: dict[str, dict] = {}
+    for feat in full.get("features", []):
+        props = feat.get("properties", {}) or {}
+        names = {props.get("NAME"), props.get("ADMIN"), props.get("NAME_EN")}
+        names.discard(None)
+        for target in wanted:
+            if target in names or names & aliases.get(target, set()):
+                out.setdefault(target, {"type": "FeatureCollection", "features": []})
+                out[target]["features"].append(feat)
+                break
+    return out
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -251,18 +309,36 @@ st.markdown(
           padding: 0.15rem 0.35rem !important;
           min-width: 0 !important;
       }
-      [data-testid="stMetricValue"] {
-          font-size: 0.82rem !important;
-          line-height: 1.0 !important;
-          color: #f1f5f9 !important;
+      /* Streamlit wraps label/value/delta in an inner div inside stMetric,
+         so the grid has to live on that wrapper, not on stMetric itself. */
+      [data-testid="stMetric"] > div {
+          display: grid !important;
+          grid-template-columns: 1fr auto !important;
+          grid-template-rows: auto auto !important;
+          column-gap: 0.35rem !important;
+          align-items: end !important;
+          width: 100% !important;
       }
       [data-testid="stMetricLabel"] {
+          grid-column: 1 / 3 !important;
+          grid-row: 1 !important;
           font-size: 0.55rem !important;
           color: #94a3b8 !important;
           line-height: 1.0 !important;
       }
       [data-testid="stMetricLabel"] p { font-size: 0.55rem !important; }
+      [data-testid="stMetricValue"] {
+          grid-column: 1 !important;
+          grid-row: 2 !important;
+          font-size: 0.82rem !important;
+          line-height: 1.0 !important;
+          color: #f1f5f9 !important;
+      }
       [data-testid="stMetricDelta"] {
+          grid-column: 2 !important;
+          grid-row: 2 !important;
+          align-self: end !important;
+          white-space: nowrap !important;
           font-size: 0.52rem !important;
           line-height: 1.0 !important;
       }
@@ -276,6 +352,25 @@ st.markdown(
       div[data-testid="stVerticalBlock"] > div { gap: 0.35rem !important; }
       [data-testid="stSlider"] { padding: 0 !important; }
       section[data-testid="stSidebar"] .block-container { padding-top: 1rem !important; }
+      /* Ship-types multiselect: colour each chip to match the stacked bar
+         chart. Alphabetical-default order from ship_types:
+           1=container, 2=dry_bulk, 3=gas, 4=general_cargo, 5=ro_ro, 6=tanker.
+         Toggling items reorders the chips, but the common case (everything
+         selected) matches the chart legend. */
+      [data-testid="stMultiSelect"] [data-baseweb="tag"] {
+          color: #0b1220 !important;
+          border: none !important;
+      }
+      [data-testid="stMultiSelect"] [data-baseweb="tag"] span,
+      [data-testid="stMultiSelect"] [data-baseweb="tag"] div {
+          color: inherit !important;
+      }
+      [data-testid="stMultiSelect"] [data-baseweb="tag"]:nth-of-type(1) { background: #3b82f6 !important; color: #f8fafc !important; }
+      [data-testid="stMultiSelect"] [data-baseweb="tag"]:nth-of-type(2) { background: #a16207 !important; color: #f8fafc !important; }
+      [data-testid="stMultiSelect"] [data-baseweb="tag"]:nth-of-type(3) { background: #eab308 !important; color: #0b1220 !important; }
+      [data-testid="stMultiSelect"] [data-baseweb="tag"]:nth-of-type(4) { background: #14b8a6 !important; color: #0b1220 !important; }
+      [data-testid="stMultiSelect"] [data-baseweb="tag"]:nth-of-type(5) { background: #a855f7 !important; color: #f8fafc !important; }
+      [data-testid="stMultiSelect"] [data-baseweb="tag"]:nth-of-type(6) { background: #ef4444 !important; color: #f8fafc !important; }
       /* Map wrapper: a span.pw-map-anchor sits in an stElementContainer
          immediately before the plotly map. The :has() + sibling rule paints
          the next element-container (the map) with a thin white border. */
@@ -443,20 +538,52 @@ slider_max = daily["date"].iloc[-1].to_pydatetime()
 # with a chart-heading so the two panels read as distinct graphs.
 with rest_slot.container():
     # Map-date slider FIRST (above the heading), then the centered heading,
-    # then the chart itself. This keeps the primary control above the thing
-    # it controls and puts the chart title directly over the chart.
+    # then the chart itself. A small play/pause button sits to the left of
+    # the slider so students can watch the map animate through time.
+    #
+    # Animation pattern: the play button flips st.session_state.playing.
+    # If playing, we advance the stored date by one step BEFORE the slider
+    # renders (so the widget picks up the new value), then at the very
+    # bottom of the script we sleep briefly and call st.rerun() to tick.
+    SLIDER_KEY = "map_date_slider"
+    if SLIDER_KEY not in st.session_state:
+        st.session_state[SLIDER_KEY] = slider_max
+    if "playing" not in st.session_state:
+        st.session_state.playing = False
+
+    # Clamp any stale value against the current filter bounds.
+    if st.session_state[SLIDER_KEY] < slider_min:
+        st.session_state[SLIDER_KEY] = slider_min
+    if st.session_state[SLIDER_KEY] > slider_max:
+        st.session_state[SLIDER_KEY] = slider_max
+
+    # If we're in a play tick, advance the stored date by one day.
+    if st.session_state.playing and slider_min != slider_max:
+        nxt = st.session_state[SLIDER_KEY] + timedelta(days=1)
+        if nxt > slider_max:
+            nxt = slider_min  # wrap around so it loops forever
+        st.session_state[SLIDER_KEY] = nxt
+
     if slider_min == slider_max:
         selected_day = slider_max
     else:
-        selected_day = st.slider(
-            "Map date",
-            min_value=slider_min,
-            max_value=slider_max,
-            value=slider_max,
-            format="YYYY-MM-DD",
-            step=timedelta(days=1),
-            label_visibility="collapsed",
-        )
+        play_col, slider_col = st.columns([1, 10], gap="small")
+        with play_col:
+            label = "⏸" if st.session_state.playing else "▶"
+            if st.button(label, key="play_btn", use_container_width=True,
+                         help="Auto-advance the map date. Click again to pause."):
+                st.session_state.playing = not st.session_state.playing
+                st.rerun()
+        with slider_col:
+            selected_day = st.slider(
+                "Map date",
+                min_value=slider_min,
+                max_value=slider_max,
+                format="YYYY-MM-DD",
+                step=timedelta(days=1),
+                key=SLIDER_KEY,
+                label_visibility="collapsed",
+            )
     st.markdown("<div class='chart-heading'>Daily transits through Hormuz</div>", unsafe_allow_html=True)
 
     selected_day_ts = pd.Timestamp(selected_day).normalize()
@@ -552,7 +679,11 @@ with rest_slot.container():
         ),
         yaxis=dict(gridcolor="#1e293b", showgrid=True, title=None, tickfont=dict(size=11)),
         barmode="stack",
-        legend=dict(orientation="h", y=1.4, x=1, xanchor="right", font=dict(size=10), title=None),
+        legend=dict(
+            orientation="h", y=1.4, x=1, xanchor="right",
+            font=dict(size=10, color="#f8fafc"),
+            title=None,
+        ),
     )
     st.plotly_chart(fig_bar, use_container_width=True, config={"displayModeBar": False})
 
@@ -631,23 +762,29 @@ with map_slot.container():
             if c not in COUNTRY_COLORS
         ]
 
-        # White outline halo underneath every port bubble. Scattermapbox
-        # markers have no `marker.line` support, so we fake an outline by
-        # plotting every port twice: first as a slightly larger white dot,
-        # then the coloured country dot on top. The size bump is 2.6 px
-        # which reads as a clean ~1 px ring around each bubble.
-        fig_map.add_trace(go.Scattermapbox(
-            lat=ports_plot["lat"],
-            lon=ports_plot["lon"],
-            mode="markers",
-            marker=dict(
-                size=(ports_plot["__size"] + 2.6).tolist(),
-                color="#ffffff",
-                opacity=0.95,
-            ),
-            hoverinfo="skip",
-            showlegend=False,
-        ))
+        # Outline halo underneath every port bubble. Scattermapbox markers
+        # have no `marker.line` support, so we fake an outline by plotting
+        # every port twice: first as a slightly larger dot in a LIGHTER
+        # shade of the country's colour, then the normal coloured dot on
+        # top. We loop per-country so each halo matches its bubble, giving
+        # a soft pastel ring around each one instead of a hard white stroke.
+        for country in country_order:
+            group = ports_plot[ports_plot["country"] == country]
+            if group.empty:
+                continue
+            halo_colour = _lighten(COUNTRY_COLORS.get(country, "#94a3b8"), 0.55)
+            fig_map.add_trace(go.Scattermapbox(
+                lat=group["lat"],
+                lon=group["lon"],
+                mode="markers",
+                marker=dict(
+                    size=(group["__size"] + 2.6).tolist(),
+                    color=halo_colour,
+                    opacity=0.95,
+                ),
+                hoverinfo="skip",
+                showlegend=False,
+            ))
 
         for country in country_order:
             group = ports_plot[ports_plot["country"] == country]
@@ -709,11 +846,11 @@ with map_slot.container():
     # glow reads as heat building up around the centre instead of a flat
     # pink wash. Drawn first so everything else sits on top.
     glow_layers = [
-        (1.30, "rgba(69, 10, 10, 0.28)"),    # red-950 — deepest outer
-        (1.05, "rgba(127, 29, 29, 0.34)"),   # red-900
-        (0.82, "rgba(185, 28, 28, 0.42)"),   # red-700
-        (0.62, "rgba(220, 38, 38, 0.52)"),   # red-600
-        (0.44, "rgba(239, 68, 68, 0.62)"),   # red-500 — hot inner halo
+        (1.30, "rgba(69, 10, 10, 0.05)"),    # red-950 — deepest outer smoke
+        (1.05, "rgba(127, 29, 29, 0.07)"),   # red-900
+        (0.82, "rgba(185, 28, 28, 0.09)"),   # red-700
+        (0.62, "rgba(220, 38, 38, 0.12)"),   # red-600
+        (0.44, "rgba(239, 68, 68, 0.16)"),   # red-500 — hot inner halo
     ]
     for radius_deg, rgba in glow_layers:
         g_lats, g_lons = _latlon_ring(HORMUZ_LAT, HORMUZ_LON, radius_deg)
@@ -732,9 +869,9 @@ with map_slot.container():
     # outer → vivid red middle → hot orange inner. Widths thicken toward
     # the centre so the eye reads a clean bullseye.
     concentric_rings = [
-        (0.48, "#991b1b", 2.0),  # outer  — deep crimson (red-800)
-        (0.30, "#ef4444", 3.0),  # middle — vivid red    (red-500)
-        (0.15, "#f97316", 3.5),  # inner  — hot orange   (orange-500)
+        (0.48, "#991b1b", 1.2),  # outer  — deep crimson (red-800)
+        (0.30, "#ef4444", 1.8),  # middle — vivid red    (red-500)
+        (0.15, "#f97316", 2.4),  # inner  — hot orange   (orange-500)
     ]
     for radius_deg, color, width in concentric_rings:
         r_lats, r_lons = _latlon_ring(HORMUZ_LAT, HORMUZ_LON, radius_deg)
@@ -751,20 +888,26 @@ with map_slot.container():
     # hottest visible core is yellow-white, wrapped in orange, wrapped in
     # red — three marker traces at the same lat/lon build that up. The
     # topmost (brightest) dot carries the hover tooltip.
-    _core_size = max(10, min(24, 6 + day_val * 0.18))
+    # Multiplicative sizing so all three dots scale *together* with day volume.
+    # Additive offsets (+4, +8) would skew the visual: a small core with a
+    # fixed +8 halo looks cartoonish; a big core with the same +8 looks
+    # cropped. Proportional ratios keep the flame shape stable at every size.
+    _core_size = max(6, min(14, 4 + day_val * 0.10))
+    _mid_size = _core_size * 1.55
+    _outer_size = _core_size * 2.10
     fig_map.add_trace(go.Scattermapbox(  # deep red background dot
         lat=[HORMUZ_LAT], lon=[HORMUZ_LON], mode="markers",
-        marker=dict(size=_core_size + 10, color="#dc2626", opacity=0.95),
+        marker=dict(size=_outer_size, color="#dc2626", opacity=0.38),
         hoverinfo="skip", showlegend=False,
     ))
     fig_map.add_trace(go.Scattermapbox(  # hot orange mid layer
         lat=[HORMUZ_LAT], lon=[HORMUZ_LON], mode="markers",
-        marker=dict(size=_core_size + 5, color="#f97316", opacity=0.95),
+        marker=dict(size=_mid_size, color="#f97316", opacity=0.55),
         hoverinfo="skip", showlegend=False,
     ))
-    fig_map.add_trace(go.Scattermapbox(  # yellow-white hottest core + tooltip
+    fig_map.add_trace(go.Scattermapbox(  # white-hot core + tooltip
         lat=[HORMUZ_LAT], lon=[HORMUZ_LON], mode="markers",
-        marker=dict(size=_core_size, color="#fde047", opacity=1.0),
+        marker=dict(size=_core_size, color="#fff7ed", opacity=0.85),
         name="Hormuz chokepoint",
         showlegend=False,
         hovertemplate=(
@@ -835,6 +978,23 @@ with map_slot.container():
                     "line": {"width": 1.2},
                     "source": load_coastline_geojson(),
                 },
+                # Very faint per-country fill tinted with each country's
+                # palette colour. This gives students a geographic anchor
+                # ("oh, that yellow cluster is in Iran, the green cluster
+                # is in Saudi") without overpowering the bubbles on top.
+                # Drawn below the coastline so the coast still pops.
+                *[
+                    {
+                        "below": "traces",
+                        "sourcetype": "geojson",
+                        "type": "fill",
+                        "color": COUNTRY_COLORS[_country],
+                        "opacity": 0.10,
+                        "source": _geojson,
+                    }
+                    for _country, _geojson in load_country_polygons().items()
+                    if _country in COUNTRY_COLORS
+                ],
             ],
             center=dict(lat=25.5, lon=55.0),
             zoom=4.4,
@@ -891,3 +1051,14 @@ with kpi_slot.container():
             delta=f"{((latest_val / year_ago) - 1) * 100:+.1f}%",
         )
     st.markdown("</div>", unsafe_allow_html=True)
+
+
+# ───────────────────────── Animation tick ─────────────────────────────────
+# If the user hit the play button, pause briefly and rerun. Streamlit has
+# no native animation loop — we build one by ending the script with
+# time.sleep + st.rerun, so every tick is a full top-to-bottom rerun that
+# advances the stored slider date by one day (see the top of rest_slot).
+# Adjust the sleep to taste: 0.15s ≈ ~6 fps, fine for a teaching demo.
+if st.session_state.get("playing", False):
+    time.sleep(0.15)
+    st.rerun()

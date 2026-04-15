@@ -21,6 +21,7 @@ turned off — the equirectangular world view has no useful zoom state
 to preserve anyway.
 """
 
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -407,22 +408,31 @@ st.markdown(
 
       /* Date / time / text inputs — force visible foreground and
          a dark surface so the text doesn't blend into the
-         background in light themes. */
+         background. Use broad selectors so both legacy and newer
+         Streamlit widget DOM structures are covered. */
+      .stDateInput input,
+      .stTimeInput input,
+      .stTextInput input,
       div[data-testid="stDateInput"] input,
       div[data-testid="stTimeInput"] input,
-      div[data-testid="stTextInput"] input {
-          background-color: #0e1628 !important;
-          color: #e6edf7 !important;
-          border: 1px solid #2a3859 !important;
+      div[data-testid="stTextInput"] input,
+      div[data-testid="stDateInputField"] input,
+      div[data-testid="stTextInputRootElement"] input {
+          background-color: #17223a !important;
+          color: #ffffff !important;
+          border: 1px solid #4b5d85 !important;
+          caret-color: #ffffff !important;
       }
-      div[data-testid="stDateInput"] input::placeholder,
+      .stTextInput input::placeholder,
+      .stDateInput input::placeholder,
       div[data-testid="stTextInput"] input::placeholder {
-          color: #6b7a9a !important;
+          color: #8392b0 !important;
       }
 
-      /* Compact step buttons in the bottom control strip (but NOT
-         the play buttons above the slider — those stay full size). */
-      .st-key-bottom_ctrl .stButton > button {
+      /* Compact step buttons (six ± buttons under the slider) — but
+         NOT the play buttons flanking the slider, which stay normal
+         size so they're easy to hit. */
+      .st-key-step_row .stButton > button {
           padding: 0.18rem 0.35rem !important;
           font-size: 0.72rem !important;
           min-height: 1.7rem !important;
@@ -610,13 +620,14 @@ if "play_dir" not in st.session_state:
 if "globe_center" not in st.session_state:
     st.session_state.globe_center = (20.0, 0.0)
 if "location_query" not in st.session_state:
-    st.session_state.location_query = ""
+    st.session_state.location_query = None
 
 
 def _on_location_change() -> None:
-    hit = _match_city(st.session_state.location_query)
-    if hit is not None:
-        st.session_state.globe_center = hit
+    # The selectbox returns an exact city key from CITIES (or None).
+    pick = st.session_state.location_query
+    if pick and pick in CITIES:
+        st.session_state.globe_center = CITIES[pick]
 
 
 def _toggle_play(direction: str) -> None:
@@ -729,21 +740,24 @@ def _sync_from_widgets() -> None:
 # Establish widget keys with defaults so the top row can read them
 # on the first run before the widgets below have rendered.
 _defaults = {
-    "projection": "Globe",
-    "layer": "Body tracks",
     "window_hours": 168,
     "show_zodiac_band": True,
     "show_rising": False,
+    "show_body_tracks": True,
+    "show_day_night": True,
 }
 for _k, _v in _defaults.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
-projection       = st.session_state["projection"]
-layer            = st.session_state["layer"]
+# Projection is fixed to Globe; Overlay is replaced by a single
+# body-tracks checkbox.
+projection       = "Globe"
+layer            = "Body tracks" if st.session_state["show_body_tracks"] else "None"
 window_hours     = st.session_state["window_hours"]
 show_zodiac_band = st.session_state["show_zodiac_band"]
 show_rising      = st.session_state["show_rising"]
+show_day_night   = st.session_state["show_day_night"]
 
 # Clamp the scrub slider to the current window so widening/narrowing
 # the window doesn't leave it out of range.
@@ -951,8 +965,10 @@ def _segment_bounds(start: int, end: int, n_seg: int) -> list[tuple[int, int]]:
 
 
 def _segment_alpha(si: int) -> float:
-    """Opacity for segment `si` — 0 = oldest (faint), N-1 = newest."""
-    return 0.08 + 0.92 * (si / max(1, N_TRAIL_SEGMENTS - 1))
+    """Opacity for segment `si` — 0 = oldest (~invisible), N-1 =
+    newest (~half-opaque). Trails are deliberately soft so the
+    globe surface reads through them."""
+    return 0.04 + 0.46 * (si / max(1, N_TRAIL_SEGMENTS - 1))
 
 
 if layer == "Body tracks":
@@ -1021,68 +1037,66 @@ if layer == "Body tracks":
             hoverinfo="skip",
         ))
 
-# Overlay: day/night. The terminator line is a great circle 90° from
-# the subsolar point. To light up the whole day hemisphere (not just
-# draw the boundary), we also rasterise a dense lat/lon grid and
-# keep every point whose angular distance to the subsolar point is
-# < 90°. Those points get a pale-yellow scatter wash that visibly
-# brightens half the globe; the antisolar marker sits at the darkest
-# point of night for reference.
-if layer == "Day / night":
-    sun = next((s for s in subpoints if s[0] == "Sun"), None)
-    if sun is not None:
-        sun_lat, sun_lon = sun[1], sun[2]
+# Day / night — gated by a checkbox. Filled polygon bounded by
+# the terminator great circle, sampled densely enough (181 points)
+# that it reads as a smooth curve. `fill="toself"` fills the
+# polygon interior in one pass — no stacked markers.
+_sun = next((s for s in subpoints if s[0] == "Sun"), None)
+if show_day_night and _sun is not None:
+    _sun_lat, _sun_lon = _sun[1], _sun[2]
 
-        # Day-hemisphere wash — sample a 3°×3° grid and keep every
-        # cell within 90° great-circle distance of the subsolar
-        # point. 60×120 = 7200 cells; about half survive, which
-        # plotly renders fast as a single scatter trace.
-        _ws_lats = np.arange(-87.0, 87.1, 3.0)
-        _ws_lons = np.arange(-177.0, 177.1, 3.0)
-        _lon_g, _lat_g = np.meshgrid(_ws_lons, _ws_lats)
-        _phi1 = np.deg2rad(sun_lat)
-        _phi2 = np.deg2rad(_lat_g)
-        _dlam = np.deg2rad(_lon_g - sun_lon)
-        _cos_d = (
-            np.sin(_phi1) * np.sin(_phi2)
-            + np.cos(_phi1) * np.cos(_phi2) * np.cos(_dlam)
-        )
-        _day_mask = _cos_d > 0.0
-        # Fade the wash near the terminator so the transition is
-        # soft instead of a hard cutoff. cos_d goes from 1 at sub-
-        # solar to 0 at the terminator; we map that to an opacity
-        # curve peaking in the middle of the day side.
-        _alpha = np.clip(_cos_d[_day_mask], 0.0, 1.0) ** 0.6
+    # Build a closed terminator polygon WITHOUT the antimeridian
+    # NaN split — `terminator()` splits for clean line rendering on
+    # flat maps, but a polygon fill needs one continuous loop.
+    _N = 181
+    _lat0 = math.radians(_sun_lat)
+    _lon0 = math.radians(_sun_lon)
+    _bear = np.linspace(0.0, 2.0 * math.pi, _N)
+    _tlat = np.arcsin(np.cos(_lat0) * np.cos(_bear))
+    _tlon = _lon0 + np.arctan2(
+        np.sin(_bear) * np.cos(_lat0),
+        -np.sin(_lat0) * np.sin(_tlat),
+    )
+    _tlat = np.rad2deg(_tlat)
+    _tlon = (np.rad2deg(_tlon) + 180.0) % 360.0 - 180.0
+
+    # On flat projections the antimeridian crossing would drag the
+    # fill across the whole map in a horizontal streak. Only use
+    # the filled polygon on orthographic (globe) where the ring
+    # sits on the sphere cleanly. For flat maps fall back to the
+    # existing grid wash (still better than nothing visually).
+    if _projection_type == "orthographic":
         fig.add_trace(go.Scattergeo(
-            lat=_lat_g[_day_mask],
-            lon=_lon_g[_day_mask],
-            mode="markers",
-            marker=dict(
-                size=9,
-                color="#fef3c7",
-                opacity=_alpha.tolist(),
-                line=dict(width=0),
-            ),
+            lat=_tlat, lon=_tlon,
+            mode="lines",
+            line=dict(color="#fbbf24", width=1.2),
+            fill="toself",
+            fillcolor="rgba(255, 240, 180, 0.16)",
             name="Day side",
             hoverinfo="skip",
             showlegend=False,
         ))
-
-        # Terminator line itself — a dotted amber great circle.
-        term_lats, term_lons = terminator(sun_lat, sun_lon)
+    else:
+        # Flat-map fallback: the grid wash still works because
+        # there's no polygon winding to worry about.
+        _ws_lats = np.arange(-87.0, 87.1, 3.0)
+        _ws_lons = np.arange(-177.0, 177.1, 3.0)
+        _lon_g, _lat_g = np.meshgrid(_ws_lons, _ws_lats)
+        _cos_d = (
+            np.sin(math.radians(_sun_lat)) * np.sin(np.deg2rad(_lat_g))
+            + np.cos(math.radians(_sun_lat))
+              * np.cos(np.deg2rad(_lat_g))
+              * np.cos(np.deg2rad(_lon_g - _sun_lon))
+        )
+        _day_mask = _cos_d > 0.0
+        _alpha = np.clip(_cos_d[_day_mask], 0.0, 1.0) ** 0.6 * 0.4
         fig.add_trace(go.Scattergeo(
-            lat=term_lats, lon=term_lons, mode="lines",
-            line=dict(color="#fbbf24", width=2, dash="dot"),
-            name="Terminator",
+            lat=_lat_g[_day_mask], lon=_lon_g[_day_mask],
+            mode="markers",
+            marker=dict(size=9, color="#fef3c7", opacity=_alpha.tolist(), line=dict(width=0)),
+            name="Day side",
             hoverinfo="skip",
-        ))
-        anti_lat = -sun_lat
-        anti_lon = ((sun_lon + 180.0 + 180.0) % 360.0) - 180.0
-        fig.add_trace(go.Scattergeo(
-            lat=[anti_lat], lon=[anti_lon], mode="markers",
-            marker=dict(size=8, color=SURFACE, line=dict(color=MUTED, width=1)),
-            name="Antisolar",
-            hovertemplate="Antisolar (midnight)<extra></extra>",
+            showlegend=False,
         ))
 
 # Optional ecliptic-great-circle reference. Drawn *before* the markers
@@ -1317,13 +1331,8 @@ with TABLE_COL:
                 ]},
            ])
     )
-    with st.container(border=True):
-        st.markdown(styled.to_html(), unsafe_allow_html=True)
-
-    # --- Inputs directly under the table -------------------------------
-    # Date / time / location — the "big move" controls live here so
-    # the bottom control strip only needs to hold the step buttons
-    # and the display options.
+    # --- Inputs (rendered ABOVE the table HTML so the styler's
+    #     <style> block can't affect their event handlers) -----------
     _ti_cols = st.columns([1, 1])
     _ti_cols[0].date_input(
         "Date (UTC)",
@@ -1336,12 +1345,48 @@ with TABLE_COL:
         on_change=_sync_from_widgets,
         step=3600,
     )
-    st.text_input(
+    # Selectbox gives us a proper searchable dropdown — click it,
+    # type a few letters, pick the match. More discoverable than a
+    # free-text input that only works for cities in our gazetteer.
+    _city_names = sorted(CITIES.keys(), key=lambda s: s.title())
+    st.selectbox(
         "Center globe on",
+        options=_city_names,
+        index=None,
+        placeholder="— pick a place —",
+        format_func=lambda s: s.title(),
         key="location_query",
         on_change=_on_location_change,
-        placeholder="e.g. Sydney, New York, Tokyo…",
-        help="Type a city name and hit Enter — the globe swings to that place.",
+        help="Click and type to filter — the globe swings to the city you pick.",
+    )
+
+    # Table rendered via st.html (raw-HTML element, not markdown) so
+    # the styler's inline <style> block doesn't poison later widgets.
+    with st.container(border=True):
+        st.html(styled.to_html())
+
+    # Four display toggles immediately under the table, right next
+    # to it in the left column.
+    _lc = st.columns(4)
+    _lc[0].checkbox(
+        "Body tracks",
+        key="show_body_tracks",
+        help="Draw a fading subpoint trail behind each body over the last ~24 h.",
+    )
+    _lc[1].checkbox(
+        "Zodiac band",
+        key="show_zodiac_band",
+        help="The 12 colored 30° arcs of the ecliptic on the globe.",
+    )
+    _lc[2].checkbox(
+        "Rising signs",
+        key="show_rising",
+        help="Wash each lat/lon by the sign rising on its eastern horizon.",
+    )
+    _lc[3].checkbox(
+        "Day / night",
+        key="show_day_night",
+        help="Fill the sunlit hemisphere — bounded by the Sun's terminator great circle.",
     )
 
 
@@ -1381,23 +1426,7 @@ with MAP_COL:
             or st.session_state.slider_dt < _slider_min
             or st.session_state.slider_dt > _slider_max):
         st.session_state.slider_dt = _anchor
-    # Zodiac / Rising toggles — floated up into the empty area
-    # below the legend using a negative-margin container. The
-    # st_key class hook lets us target this exact container in
-    # CSS so we can pull it upward into the plot area without
-    # pushing the slider down, and shrink the checkboxes to fit.
-    with st.container(key="key_toggles"):
-        _spacer, _key_toggles = st.columns([6, 1])
-        _key_toggles.checkbox(
-            "Zodiac",
-            key="show_zodiac_band",
-            help="12 colored 30° arcs of the ecliptic on the globe.",
-        )
-        _key_toggles.checkbox(
-            "Rising",
-            key="show_rising",
-            help="Wash each lat/lon by the sign rising on its eastern horizon.",
-        )
+    # (Toggles moved to the left column directly under the table.)
 
     _back_active = (st.session_state.play_dir == "backward")
     _fwd_active  = (st.session_state.play_dir == "forward")
@@ -1428,6 +1457,18 @@ with MAP_COL:
         help="Play forward through time — click again to stop.",
     )
 
+    # Six step buttons sit directly under the slider, spanning only
+    # the map column's width — tighter than the full-page bottom
+    # strip they used to live in.
+    with st.container(key="step_row"):
+        sb = st.columns(6, gap="small")
+        sb[0].button("− 1 mo", on_click=_shift, args=(timedelta(days=-30),), width="stretch")
+        sb[1].button("− 1 d",  on_click=_shift, args=(timedelta(days=-1),),  width="stretch")
+        sb[2].button("− 1 h",  on_click=_shift, args=(timedelta(hours=-1),), width="stretch")
+        sb[3].button("+ 1 h",  on_click=_shift, args=(timedelta(hours=1),),  width="stretch")
+        sb[4].button("+ 1 d",  on_click=_shift, args=(timedelta(days=1),),   width="stretch")
+        sb[5].button("+ 1 mo", on_click=_shift, args=(timedelta(days=30),),  width="stretch")
+
 
 # ---------------------------------------------------------------------------
 # Compact control strip at the bottom of the page
@@ -1440,33 +1481,16 @@ with MAP_COL:
 st.markdown('<div class="control-strip-top"></div>', unsafe_allow_html=True)
 
 with st.container(key="bottom_ctrl"):
-    c1 = st.columns([1, 1, 1, 0.25, 1, 1, 1])
-    c1[0].button("− 1 mo", on_click=_shift, args=(timedelta(days=-30),), width="stretch")
-    c1[1].button("− 1 d",  on_click=_shift, args=(timedelta(days=-1),),  width="stretch")
-    c1[2].button("− 1 h",  on_click=_shift, args=(timedelta(hours=-1),), width="stretch")
-    c1[4].button("+ 1 h",  on_click=_shift, args=(timedelta(hours=1),),  width="stretch")
-    c1[5].button("+ 1 d",  on_click=_shift, args=(timedelta(days=1),),   width="stretch")
-    c1[6].button("+ 1 mo", on_click=_shift, args=(timedelta(days=30),),  width="stretch")
-
-    c2 = st.columns([1, 1, 2])
-    c2[0].selectbox(
-        "Projection",
-        ["Globe", "Natural Earth", "Flat (equirectangular)"],
-        key="projection",
-        label_visibility="collapsed",
-    )
-    c2[1].selectbox(
-        "Overlay",
-        ["Body tracks", "Day / night", "None"],
-        key="layer",
-        label_visibility="collapsed",
-    )
-    c2[2].select_slider(
+    # Only the Track-window slider lives in this strip now. Step
+    # buttons are under the slider in MAP_COL; projection is fixed
+    # to the Globe; the body-tracks / zodiac / rising toggles live
+    # under the table; date/time/location live above the table.
+    st.select_slider(
         "Track window",
         options=[6, 24, 72, 168, 720],
         key="window_hours",
         format_func=lambda h: {6: "6 h", 24: "24 h", 72: "3 d", 168: "7 d", 720: "30 d"}[h],
-        disabled=(layer != "Body tracks"),
+        disabled=not st.session_state["show_body_tracks"],
         label_visibility="collapsed",
     )
 
