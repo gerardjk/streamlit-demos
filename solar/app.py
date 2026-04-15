@@ -189,18 +189,17 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-      /* Hide the Deploy button, status toast, and menu — but LEAVE the
-         header element itself in place so the sidebar collapse/expand
-         toggle (which lives inside stHeader) stays clickable. Making
-         the header transparent + zero-height reclaims its space
-         without removing the toggle. */
-      header[data-testid="stHeader"] {
-          background: transparent !important;
-          height: 0 !important;
-      }
+      /* Hide only the Deploy button / main menu — LEAVE Streamlit's
+         header intact, because the sidebar collapse/expand toggle
+         lives inside it and hiding the header was taking the toggle
+         with it. Small price of a thin header bar is worth having
+         the sidebar always reachable. */
       div[data-testid="stToolbar"]    { display: none !important; }
       #MainMenu                       { display: none !important; }
       footer                          { visibility: hidden; }
+      /* Make sure the collapsed-sidebar indicator (the chevron that
+         appears when the sidebar is closed) is always visible. */
+      [data-testid="collapsedControl"] { display: block !important; }
 
       /* With the header gone, pull the main column right up to the
          top of the viewport so the map starts where the eye expects. */
@@ -223,37 +222,93 @@ st.markdown(
           padding: 0.25rem 0.25rem;
           font-size: 0.85rem;
       }
-      /* The compact header strip uses these classes. */
-      .dash-header {
+      /* Compact global title bar — spans full width, fixed 40px,
+         title on the left and current moment + overlay pills on the
+         right. Sets the "app" frame without wasting vertical space. */
+      .app-bar {
           display: flex;
-          align-items: baseline;
+          align-items: center;
           justify-content: space-between;
-          gap: 1rem;
-          padding: 0 0 0.5rem 0;
-          border-bottom: 1px solid #1e293b;
-          margin-bottom: 0.6rem;
+          padding: 0.45rem 0.9rem;
+          background: linear-gradient(90deg, #0a1226 0%, #0c1631 100%);
+          border: 1px solid #1e2d4d;
+          border-radius: 10px;
+          margin-bottom: 0.9rem;
       }
-      .dash-title {
-          font-size: 1.15rem;
+      .app-bar .app-title {
+          font-size: 0.95rem;
           font-weight: 600;
-          color: #e2e8f0;
-          letter-spacing: 0.01em;
+          letter-spacing: 0.02em;
+          color: #e6edf7;
+          display: flex; align-items: center; gap: 0.45rem;
       }
-      .dash-title .dim { color: #94a3b8; font-weight: 400; }
-      .dash-meta {
-          font-size: 0.9rem;
-          color: #94a3b8;
+      .app-bar .app-title .glyph { font-size: 1.1rem; }
+      .app-bar .app-meta {
+          font-size: 0.82rem;
+          color: #8392b0;
           font-variant-numeric: tabular-nums;
       }
-      .dash-meta b { color: #e2e8f0; font-weight: 600; }
-      .dash-meta .pill {
+      .app-bar .app-meta b { color: #e6edf7; font-weight: 600; }
+      .app-bar .pill {
           display: inline-block;
-          padding: 0.05rem 0.55rem;
-          margin-left: 0.5rem;
-          border: 1px solid #334155;
+          padding: 0.08rem 0.6rem;
+          margin-left: 0.45rem;
+          border: 1px solid #2a3859;
           border-radius: 999px;
           color: #cbd5e1;
+          font-size: 0.75rem;
       }
+
+      /* Pane headers — small, muted, uppercase labels for each column
+         so everything lines up at the same baseline. */
+      .pane-title {
+          font-size: 0.68rem;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          color: #8392b0;
+          margin: 0 0 0.4rem 0;
+          padding-bottom: 0.35rem;
+          border-bottom: 1px solid #1e2d4d;
+          height: 22px;
+      }
+
+      /* Custom legend column that sits between the table and the
+         globe, replacing Plotly's in-chart legend. */
+      .legend-box {
+          background: #0e1628;
+          border: 1px solid #1e2d4d;
+          border-radius: 8px;
+          padding: 0.55rem 0.6rem;
+          font-size: 0.78rem;
+          color: #cbd5e1;
+          max-height: 520px;
+          overflow-y: auto;
+      }
+      .legend-box .legend-section {
+          font-size: 0.68rem;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          color: #8392b0;
+          margin-bottom: 0.25rem;
+      }
+      .legend-box .legend-row {
+          display: flex;
+          align-items: center;
+          gap: 0.45rem;
+          padding: 0.1rem 0;
+          line-height: 1.15;
+      }
+      .legend-box .legend-swatch {
+          display: inline-block;
+          width: 10px;
+          height: 10px;
+          border-radius: 50%;
+          flex-shrink: 0;
+      }
+      .legend-box .legend-gap { height: 0.55rem; }
+
+      /* Compact control strip at the bottom: trim widget spacing. */
+      .control-strip-top { margin-top: 0.4rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -271,126 +326,140 @@ start_iso, end_iso = loader.coverage
 # ---------------------------------------------------------------------------
 # Session state + time-navigation callbacks
 # ---------------------------------------------------------------------------
-# The canonical "current moment" lives in st.session_state.dt. The date/
-# time widgets and the step buttons both read and write through it, so
-# they stay in sync no matter which one the user touches.
+# The "effective moment" used by the table, map, and legend is:
+#
+#     dt = anchor_dt + scrub_hours hours
+#
+# `anchor_dt` is set by the Date/Time inputs and the step buttons —
+# the "big move" controls. `scrub_hours` is a live slider that lets
+# the user fine-scrub within ±(window/2) hours of the anchor, and
+# every move triggers a full Streamlit rerun so the positions table
+# + every other view updates in lockstep. Moving a coarse control
+# resets scrub_hours to 0 so the slider always re-centers on its
+# new anchor.
 
-if "dt" not in st.session_state:
-    init_dt = datetime(2024, 6, 21, 12, 0, tzinfo=timezone.utc)
-    st.session_state.dt = init_dt
-    st.session_state.d_input = init_dt.date()
-    st.session_state.t_input = init_dt.time().replace(microsecond=0)
+if "anchor_dt" not in st.session_state:
+    _init = datetime(2024, 6, 21, 12, 0, tzinfo=timezone.utc)
+    st.session_state.anchor_dt = _init
+    st.session_state.d_input = _init.date()
+    st.session_state.t_input = _init.time().replace(microsecond=0)
+if "scrub_h" not in st.session_state:
+    st.session_state.scrub_h = 0.0
 
 
 def _shift(delta: timedelta) -> None:
-    """Nudge the current moment by `delta` and push the new values into
-    the widget keys so the date/time inputs reflect the change."""
-    new = st.session_state.dt + delta
-    st.session_state.dt = new
+    """Jump anchor_dt by `delta` (via the step buttons) and reset the
+    scrub slider so it re-centers on the new anchor."""
+    new = st.session_state.anchor_dt + delta
+    st.session_state.anchor_dt = new
     st.session_state.d_input = new.date()
     st.session_state.t_input = new.time().replace(microsecond=0)
+    st.session_state.scrub_h = 0.0
 
 
 def _sync_from_widgets() -> None:
-    """Called when the user edits the date or time widget directly."""
-    st.session_state.dt = datetime.combine(
+    """Called when the user edits Date or Time directly — anchor jumps,
+    scrub resets."""
+    st.session_state.anchor_dt = datetime.combine(
         st.session_state.d_input,
         st.session_state.t_input,
         tzinfo=timezone.utc,
     )
+    st.session_state.scrub_h = 0.0
 
 
 # ---------------------------------------------------------------------------
 # Sidebar (controls)
 # ---------------------------------------------------------------------------
 
-with st.sidebar:
-    st.header("Controls")
-    st.caption(f"Coverage {start_iso[:10]} → {end_iso[:10]}")
+# ---------------------------------------------------------------------------
+# Three-column top row: positions table | legend strip | square globe
+# ---------------------------------------------------------------------------
+# Controls live in a compact strip at the bottom (see the end of the
+# file). The top row is just the data + its companion viz:
+#
+#   LEFT  (wide)   — positions table
+#   MID   (narrow) — custom HTML legend between the table and the
+#                    globe, replacing Plotly's in-chart legend
+#   RIGHT (wide)   — the globe (orthographic, roughly square)
+#
+# We *create* the three columns here but only write the table into
+# LEFT now — the legend and the plotly chart are written later once
+# we know which layers are active. The control strip at the bottom
+# writes the widgets and defines projection / layer / window_hours /
+# show_zodiac_band / show_rising.
 
-    st.subheader("Time", divider="gray")
-    st.date_input("Date (UTC)", key="d_input", on_change=_sync_from_widgets)
-    st.time_input("Time (UTC)", key="t_input", on_change=_sync_from_widgets, step=3600)
+# Controls must be rendered BEFORE we reference their values. We build
+# a bottom-of-page container that Streamlit renders in order (top to
+# bottom), but we execute the widget code first so variables are
+# defined. Trick: put widget code inside an st.empty() placeholder
+# that we'll fill at the end, while the widget values are read from
+# session_state via their keys.
+#
+# Simpler approach: just build the control widgets first, capture
+# their values, and — in a final pass — use st.columns at the very
+# bottom of the page to render the control strip. But since the
+# widgets themselves produce the DOM nodes, we can't render them
+# twice. So instead we render the TOP row first (positions + legend
+# + map) with *computed* values, and the BOTTOM row second (control
+# strip with the actual widgets).
+#
+# That works as long as we know what defaults to use on a given run
+# and can read back the live widget values from session_state.
 
-    # Step buttons laid out as two symmetric rows — back on top, forward
-    # below. Using equal-width columns so each button is uniform.
-    st.caption("Step backward")
-    back = st.columns(3)
-    back[0].button("− 1 mo", on_click=_shift, args=(timedelta(days=-30),),  use_container_width=True)
-    back[1].button("− 1 d",  on_click=_shift, args=(timedelta(days=-1),),   use_container_width=True)
-    back[2].button("− 1 h",  on_click=_shift, args=(timedelta(hours=-1),),  use_container_width=True)
+# Establish widget keys with defaults so the top row can read them
+# on the first run before the widgets below have rendered.
+_defaults = {
+    "projection": "Globe",
+    "layer": "Body tracks",
+    "window_hours": 168,
+    "show_zodiac_band": True,
+    "show_rising": False,
+}
+for _k, _v in _defaults.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
 
-    st.caption("Step forward")
-    fwd = st.columns(3)
-    fwd[0].button("+ 1 h",  on_click=_shift, args=(timedelta(hours=1),),    use_container_width=True)
-    fwd[1].button("+ 1 d",  on_click=_shift, args=(timedelta(days=1),),     use_container_width=True)
-    fwd[2].button("+ 1 mo", on_click=_shift, args=(timedelta(days=30),),    use_container_width=True)
+projection       = st.session_state["projection"]
+layer            = st.session_state["layer"]
+window_hours     = st.session_state["window_hours"]
+show_zodiac_band = st.session_state["show_zodiac_band"]
+show_rising      = st.session_state["show_rising"]
 
-    st.subheader("Display", divider="gray")
-    # Projection choice. Orthographic is the default because it reads
-    # instantly as a globe — and lines of constant declination become
-    # visible curves, which matches people's intuition of "the Sun's
-    # path across the sky" better than a flat equirectangular band.
-    projection = st.selectbox(
-        "Projection",
-        ["Globe", "Natural Earth", "Flat (equirectangular)"],
-        index=0,
-        help="Globe rotates in 3D; flat is best for comparing longitudes.",
-    )
-    # Mutually-exclusive primary layer — owns the bulk of the visual.
-    layer = st.selectbox(
-        "Overlay",
-        ["Body tracks", "Day / night", "None"],
-        help=(
-            "Body tracks — subpoint path of each body over the selected window.\n"
-            "Day / night — the solar terminator."
-        ),
-    )
-    window_hours = st.select_slider(
-        "Track window",
-        options=[6, 24, 72, 168, 720],
-        value=168,
-        format_func=lambda h: {6: "6 h", 24: "24 h", 72: "3 d", 168: "7 d", 720: "30 d"}[h],
-        disabled=(layer != "Body tracks"),
-        help=(
-            "Width of the time window drawn for the Body tracks overlay. "
-            "Longer windows reveal the declination drift — especially for "
-            "the Moon, whose path becomes a clear sinusoid at 7 days or more."
-        ),
-    )
+# Clamp the scrub slider to the current window so widening/narrowing
+# the window doesn't leave scrub_h out of range.
+_half = window_hours / 2.0
+if st.session_state.scrub_h < -_half:
+    st.session_state.scrub_h = -_half
+elif st.session_state.scrub_h > _half:
+    st.session_state.scrub_h = _half
 
-    # Zodiac layers are independent toggles — they can stack on top of
-    # any primary overlay. This replaces the old mutually-exclusive
-    # "Rising sign" option in the Overlay dropdown.
-    st.caption("Zodiac")
-    show_zodiac_band = st.checkbox(
-        "Zodiac band",
-        value=True,
-        help=(
-            "The ecliptic great circle split into 12 colored 30° arcs — "
-            "each is where that sign's longitudes currently project onto "
-            "Earth. Every planet's subpoint lies on its own sign's arc."
-        ),
-    )
-    show_rising = st.checkbox(
-        "Rising signs",
-        value=False,
-        help=(
-            "Color each lat/lon by which zodiac sign is rising on the "
-            "eastern horizon there right now. Sweeps westward ~360°/day."
-        ),
-    )
+# Effective moment: anchor shifted by the scrub offset.
+dt = st.session_state.anchor_dt + timedelta(hours=float(st.session_state.scrub_h))
 
-    with st.expander("About"):
-        st.markdown(
-            "Each body's **subpoint** is the spot on Earth where it is at "
-            "the zenith. As Earth rotates, the subpoint sweeps westward — "
-            "one lap per day for the Sun. The **Body tracks** overlay "
-            "draws the path that each body's subpoint traces over the "
-            "selected time window."
-        )
 
-dt = st.session_state.dt
+# ---------------------------------------------------------------------------
+# Global title bar — compact, spans full width, sits above everything
+# ---------------------------------------------------------------------------
+_window_label = {6: "6 h", 24: "24 h", 72: "3 d", 168: "7 d", 720: "30 d"}[int(window_hours)]
+_meta_pills = f'<span class="pill">{layer}</span>'
+if layer == "Body tracks":
+    _meta_pills += f'<span class="pill">{_window_label}</span>'
+
+st.markdown(
+    f"""
+    <div class="app-bar">
+      <div class="app-title"><span class="glyph">🌍</span> Ephemeris → Earth</div>
+      <div class="app-meta">
+        <b>{dt.strftime('%Y-%m-%d %H:%M')}</b> UTC · {dt.strftime('%A')}
+        {_meta_pills}
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+TABLE_COL, LEGEND_COL, MAP_COL = st.columns([1.2, 0.5, 1.6], gap="small")
 
 
 # ─── DEMO [Hour 3]: the lazy-load moment ────────────────────────────────────
@@ -438,18 +507,7 @@ _meta_pills = f'<span class="pill">{layer}</span>'
 if layer == "Body tracks":
     _meta_pills += f'<span class="pill">window {_window_label}</span>'
 
-st.markdown(
-    f"""
-    <div class="dash-header">
-      <div class="dash-title">🌍 Ephemeris → Earth <span class="dim">· subpoints &amp; tracks</span></div>
-      <div class="dash-meta">
-        <b>{dt.strftime('%Y-%m-%d %H:%M')}</b> UTC · {dt.strftime('%A')}
-        {_meta_pills}
-      </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+# (Header moved to the global title bar above.)
 
 
 # ---------------------------------------------------------------------------
@@ -572,15 +630,21 @@ if layer == "Body tracks":
         start = max(0, center_idx - _trail_samples // 2)
         end = min(len(lats), start + _trail_samples)
         trail_indices[name] = []
-        for si, (s0, s1) in enumerate(_segment_bounds(start, end, N_TRAIL_SEGMENTS)):
-            s_lats, s_lons = split_antimeridian(lats[s0:s1], lons[s0:s1])
+        seg_bounds = _segment_bounds(start, end, N_TRAIL_SEGMENTS)
+        # Always emit exactly N_TRAIL_SEGMENTS traces per body so the
+        # animation frames can index them in lockstep. If a segment
+        # would be empty/too short, we add a NaN placeholder trace.
+        for si in range(N_TRAIL_SEGMENTS):
+            if si < len(seg_bounds):
+                s0, s1 = seg_bounds[si]
+                s_lats, s_lons = split_antimeridian(lats[s0:s1], lons[s0:s1])
+            else:
+                s_lats = np.array([np.nan])
+                s_lons = np.array([np.nan])
             fig.add_trace(go.Scattergeo(
                 lat=s_lats, lon=s_lons, mode="lines",
                 line=dict(color=BODY_COLORS[name], width=1.8),
                 opacity=_segment_alpha(si),
-                # Only the newest, brightest segment gets a legend
-                # entry; the rest share its legendgroup so toggling
-                # the legend toggles the whole trail.
                 name=name,
                 showlegend=(si == N_TRAIL_SEGMENTS - 1),
                 legendgroup=name,
@@ -673,103 +737,12 @@ fig.add_trace(go.Scattergeo(
 _now_marker_index = len(fig.data) - 1
 
 
-# ---------------------------------------------------------------------------
-# Animation frames (Body tracks only)
-# ---------------------------------------------------------------------------
-# We build one frame per animation step. Each frame carries:
-#   (a) one trail trace per body — the track from the start of the
-#       window up to the frame's moment (growing trail), split on the
-#       antimeridian for flat projections,
-#   (b) the "Now" markers repositioned to the frame's moment.
-#
-# Plotly's frame mechanism requires that every frame lists the
-# `traces` indices it is updating. We grabbed those indices above
-# (trail_indices for the body lines, _now_marker_index for markers).
-# Initial figure state = the final frame (so the static render equals
-# what you see at the end of playback), which means nothing visually
-# changes until the user presses ▶ Play.
-if layer == "Body tracks" and track_arrays:
-    # trail_indices already populated above (dict[name, list[int]],
-    # one entry per segment). ~60 animation frames feels smooth at
-    # the 80ms/frame default and keeps the payload reasonable.
-    _n_points = len(next(iter(track_arrays.values()))[0])
-    _n_frames = min(60, _n_points)
-    _frame_indices = np.linspace(0, _n_points - 1, _n_frames, dtype=int)
-
-    _half = timedelta(hours=window_hours / 2)
-    _step = (2 * _half) / max(1, _n_points - 1)
-
-    # Each frame shows a sliding N-segment fading trail ending at
-    # that frame's moment. Segments are updated by index (via the
-    # `traces=` parameter of go.Frame) so Plotly swaps their data
-    # without rebuilding the whole figure.
-    frames: list[go.Frame] = []
-    for fi, pi in enumerate(_frame_indices):
-        frame_data = []
-        frame_traces = []
-        tail_start = max(0, int(pi) - _trail_samples + 1)
-        tail_end = int(pi) + 1
-        for bname, (b_lats, b_lons) in track_arrays.items():
-            seg_bounds = _segment_bounds(tail_start, tail_end, N_TRAIL_SEGMENTS)
-            # If the tail is too short for a full N-segment split,
-            # pad with empty slots so we still match trail_indices.
-            for si in range(N_TRAIL_SEGMENTS):
-                if si < len(seg_bounds):
-                    s0, s1 = seg_bounds[si]
-                    s_lats, s_lons = split_antimeridian(b_lats[s0:s1], b_lons[s0:s1])
-                else:
-                    s_lats = np.array([np.nan])
-                    s_lons = np.array([np.nan])
-                frame_data.append(go.Scattergeo(lat=s_lats, lon=s_lons))
-                frame_traces.append(trail_indices[bname][si])
-
-        # Markers repositioned to frame moment
-        frame_data.append(go.Scattergeo(
-            lat=[track_arrays[n][0][pi] for n in now_marker_names if n in track_arrays],
-            lon=[track_arrays[n][1][pi] for n in now_marker_names if n in track_arrays],
-            text=[n for n in now_marker_names if n in track_arrays],
-        ))
-        frame_traces.append(_now_marker_index)
-
-        # Short YY-MM-DD label for the slider tick / currentvalue.
-        t_i = dt - _half + _step * int(pi)
-        label = t_i.strftime("%y-%m-%d")
-        frames.append(go.Frame(data=frame_data, traces=frame_traces, name=label))
-
-    fig.frames = frames
-    _frame_labels = [f.name for f in frames]
-
-    # Scrubber slider only — no play/pause buttons. User drags to
-    # step through time. scattergeo animation requires redraw=True
-    # because the projection re-renders the geo canvas each frame.
-    fig.update_layout(
-        sliders=[dict(
-            active=len(_frame_labels) - 1,
-            x=0.0, y=-0.08, len=1.0,
-            pad=dict(t=0, b=0),
-            currentvalue=dict(
-                prefix="t = ",
-                font=dict(color=FG, size=12),
-            ),
-            bgcolor="rgba(30,41,59,0.6)",
-            activebgcolor="#fbbf24",
-            bordercolor=BORDER,
-            tickcolor=MUTED,
-            font=dict(color=MUTED, size=10),
-            steps=[
-                dict(
-                    method="animate",
-                    label=lbl,
-                    args=[[lbl], dict(
-                        frame=dict(duration=0, redraw=True),
-                        mode="immediate",
-                        transition=dict(duration=0),
-                    )],
-                )
-                for lbl in _frame_labels
-            ],
-        )],
-    )
+# Plotly frame-based animation removed — the in-figure slider was
+# client-side only and couldn't trigger a Streamlit rerun, so the
+# positions table never refreshed. Scrubbing is now handled by the
+# Streamlit slider beneath the map, which reruns the whole script on
+# every change. Each rerun rebuilds the trails and positions table
+# for the new effective `dt`, so everything updates in lockstep.
 
 # Projection framing. The orthographic globe gets a gentle northward
 # tilt, rotated to center on the current subsolar longitude so the
@@ -796,14 +769,12 @@ else:
 
 fig.update_geos(**geo_kwargs)
 
-# Map sizing is tuned for a default laptop viewport: header strip
-# (~70px) + map (540px) + animation controls when present (~60px) +
-# browser chrome fits inside ~720px. Below that, the positions table
-# is intentionally below-the-fold — a common pattern for hero-viz
-# dashboards (map-first, details-on-scroll).
-_has_animation = bool(layer == "Body tracks" and track_arrays)
-_map_height = 540 if _has_animation else 560
-_bottom_margin = 60 if _has_animation else 6
+# Map sizing — the right column is ~half the page width, so an
+# orthographic globe naturally wants a square canvas. Plotly can't
+# measure the column directly, so we pick a fixed height that looks
+# roughly square on a standard monitor.
+_map_height = 520
+_bottom_margin = 6
 
 # Legend placement: overlaid in the top-right of the map plot area so
 # it doesn't eat vertical space. Semi-transparent background so the
@@ -823,50 +794,140 @@ fig.update_layout(
         borderwidth=1,
         font=dict(color=FG, size=11),
     ),
-    showlegend=(layer == "Body tracks" or show_zodiac_band or show_rising),
+    showlegend=False,  # legend lives in its own middle column now
 )
 
-# Plotly config: keep the modebar (for deliberate zoom-in/zoom-out/
-# reset clicks) but disable scroll-wheel zoom so the mouse wheel
-# still scrolls the page. Strip the buttons that are useless for a
-# geo chart — lasso, box-select, autoscale etc.
-st.plotly_chart(
-    fig,
-    use_container_width=True,
-    config={
-        "scrollZoom": False,
-        "displayModeBar": True,
-        "displaylogo": False,
-        "modeBarButtonsToRemove": [
-            "lasso2d", "select2d", "autoScale2d", "toggleSpikelines",
-            "hoverClosestGeo",
-        ],
-    },
-)
+# ---------------------------------------------------------------------------
+# Render the top row: table, legend, map
+# ---------------------------------------------------------------------------
+
+with TABLE_COL:
+    st.markdown('<div class="pane-title">Positions</div>', unsafe_allow_html=True)
+    rows = []
+    for name, sub_lat, sub_lon, ecl_lon in subpoints:
+        rows.append({
+            "Body":       name,
+            "Ecliptic λ": f"{ecl_lon:7.3f}°",
+            "Zodiac":     zodiac_sign_name(ecl_lon),
+            "Sub-lat":    f"{sub_lat:+6.2f}°",
+            "Sub-lon":    f"{sub_lon:+7.2f}°",
+        })
+    st.dataframe(rows, hide_index=True, use_container_width=True, height=360)
+
+
+# --- Custom HTML legend in the middle column -------------------------------
+# Plotly's built-in legend sits inside the figure frame; the user asked
+# to pull it out between the table and the globe. We build it as a
+# styled HTML block that lists only the overlays currently active.
+with LEGEND_COL:
+    st.markdown('<div class="pane-title">Key</div>', unsafe_allow_html=True)
+    legend_items: list[str] = []
+    if layer == "Body tracks":
+        legend_items.append('<div class="legend-section">Bodies</div>')
+        for bname, _, _ in BODIES:
+            color = BODY_COLORS[bname]
+            legend_items.append(
+                f'<div class="legend-row">'
+                f'<span class="legend-swatch" style="background:{color};"></span>'
+                f'<span class="legend-label">{bname}</span>'
+                f'</div>'
+            )
+    if show_zodiac_band:
+        if legend_items:
+            legend_items.append('<div class="legend-gap"></div>')
+        legend_items.append('<div class="legend-section">Zodiac</div>')
+        for i, sign in enumerate(ZODIAC_SIGNS):
+            legend_items.append(
+                f'<div class="legend-row">'
+                f'<span class="legend-swatch" style="background:{SIGN_COLORS[i]};"></span>'
+                f'<span class="legend-label">{ZODIAC_SYMBOLS[i]} {sign}</span>'
+                f'</div>'
+            )
+    if show_rising:
+        if legend_items:
+            legend_items.append('<div class="legend-gap"></div>')
+        legend_items.append('<div class="legend-section">Rising</div>')
+        for i, sign in enumerate(ZODIAC_SIGNS):
+            legend_items.append(
+                f'<div class="legend-row">'
+                f'<span class="legend-swatch" style="background:{SIGN_COLORS[i]};opacity:0.5;"></span>'
+                f'<span class="legend-label">↑ {sign}</span>'
+                f'</div>'
+            )
+    if not legend_items:
+        legend_items.append('<div class="legend-section">—</div>')
+    st.markdown(
+        '<div class="legend-box">' + ''.join(legend_items) + '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+with MAP_COL:
+    st.markdown('<div class="pane-title">View</div>', unsafe_allow_html=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={
+            "scrollZoom": False,
+            "displayModeBar": True,
+            "displaylogo": False,
+            "modeBarButtonsToRemove": [
+                "lasso2d", "select2d", "autoScale2d", "toggleSpikelines",
+                "hoverClosestGeo",
+            ],
+        },
+    )
+    # Streamlit-native scrub slider. Every drag fires a full rerun,
+    # so the positions table and the map both update in lockstep.
+    st.slider(
+        "Scrub within window (hours from anchor)",
+        min_value=float(-window_hours / 2),
+        max_value=float(window_hours / 2),
+        step=max(0.25, float(window_hours) / 200.0),
+        key="scrub_h",
+        label_visibility="collapsed",
+        format="%+.2f h",
+    )
 
 
 # ---------------------------------------------------------------------------
-# Secondary panel (below the fold)
+# Compact control strip at the bottom of the page
 # ---------------------------------------------------------------------------
-# Positions table and raw JSON live here. Both are inside an expander
-# so the initial viewport is the map-and-header only — a classic
-# "hero viz first, details on demand" pattern. The expander starts
-# collapsed; users who want the data just click.
+# All widgets live down here so the top row (table + legend + globe)
+# is uncluttered. Two tight rows: time nav on top, display on bottom.
 
-with st.expander("📊 Positions & raw data", expanded=False):
-    left, right = st.columns([3, 2])
+st.markdown('<div class="control-strip-top"></div>', unsafe_allow_html=True)
 
-    with left:
-        rows = []
-        for name, sub_lat, sub_lon, ecl_lon in subpoints:
-            rows.append({
-                "Body":       name,
-                "Ecliptic λ": f"{ecl_lon:7.3f}°",
-                "Zodiac":     zodiac_sign_name(ecl_lon),
-                "Sub-lat":    f"{sub_lat:+6.2f}°",
-                "Sub-lon":    f"{sub_lon:+7.2f}°",
-            })
-        st.dataframe(rows, hide_index=True, use_container_width=True)
+c1 = st.columns([1.2, 1, 0.6, 0.6, 0.6, 0.2, 0.6, 0.6, 0.6])
+c1[0].date_input("Date (UTC)", key="d_input", on_change=_sync_from_widgets, label_visibility="collapsed")
+c1[1].time_input("Time (UTC)", key="t_input", on_change=_sync_from_widgets, step=3600, label_visibility="collapsed")
+c1[2].button("− 1 mo", on_click=_shift, args=(timedelta(days=-30),), use_container_width=True)
+c1[3].button("− 1 d",  on_click=_shift, args=(timedelta(days=-1),),  use_container_width=True)
+c1[4].button("− 1 h",  on_click=_shift, args=(timedelta(hours=-1),), use_container_width=True)
+c1[6].button("+ 1 h",  on_click=_shift, args=(timedelta(hours=1),),  use_container_width=True)
+c1[7].button("+ 1 d",  on_click=_shift, args=(timedelta(days=1),),   use_container_width=True)
+c1[8].button("+ 1 mo", on_click=_shift, args=(timedelta(days=30),),  use_container_width=True)
 
-    with right:
-        st.json({k: v for k, v in entry.items() if v is not None})
+c2 = st.columns([1, 1, 2, 0.8, 0.8])
+c2[0].selectbox(
+    "Projection",
+    ["Globe", "Natural Earth", "Flat (equirectangular)"],
+    key="projection",
+    label_visibility="collapsed",
+)
+c2[1].selectbox(
+    "Overlay",
+    ["Body tracks", "Day / night", "None"],
+    key="layer",
+    label_visibility="collapsed",
+)
+c2[2].select_slider(
+    "Track window",
+    options=[6, 24, 72, 168, 720],
+    key="window_hours",
+    format_func=lambda h: {6: "6 h", 24: "24 h", 72: "3 d", 168: "7 d", 720: "30 d"}[h],
+    disabled=(layer != "Body tracks"),
+    label_visibility="collapsed",
+)
+c2[3].checkbox("Zodiac band",   key="show_zodiac_band")
+c2[4].checkbox("Rising signs",  key="show_rising")
