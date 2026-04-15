@@ -1,12 +1,14 @@
 """
 Strait of Hormuz — Daily Transit Monitor.
 
-Second example for the lecture: a real-world operational dashboard built
-on (synthetic, by default) IMF PortWatch chokepoint data. Demonstrates
-KPI-first layout, filter-upstream-of-views, and cross-chart context
-filtering via Plotly click events.
+A real-world operational dashboard built on (synthetic, by default)
+IMF PortWatch chokepoint data. Demonstrates KPI-first layout,
+filter-upstream-of-views, and cross-chart context filtering via
+Plotly click events.
 """
 
+import json
+import urllib.request
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -32,13 +34,26 @@ SHIP_TYPE_COLORS = {
     "ro_ro":         "#a855f7",
 }
 
+# Country palette for port markers — picked to sit clearly on top of a
+# satellite basemap (no blues, no greens that read as vegetation).
+COUNTRY_COLORS = {
+    "Saudi Arabia":         "#166534",  # dark green
+    "United Arab Emirates": "#86efac",  # light green
+    "Iran":                 "#facc15",  # yellow
+    "Qatar":                "#f97316",  # orange
+    "Kuwait":               "#92400e",  # brown
+    "Iraq":                 "#d2b48c",  # tan
+    "Bahrain":              "#f472b6",  # pink
+    "Oman":                 "#7dd3fc",  # light blue
+}
 
-# ─── DEMO [Hour 3]: @st.cache_data memoises VALUES ──────────────────────────
-# First call actually reads the file. Later calls with the same arguments get
-# the cached DataFrame — instantly. `ttl=3600` expires the entry after an hour
-# so a daily refresh eventually gets picked up. Use cache_data for DataFrames,
-# lists, dicts — anything picklable. For the *loader object* pattern, see
-# solar/app.py and @st.cache_resource.
+# Short legend labels so the horizontal legend fits on one row.
+COUNTRY_LABELS = {
+    "Saudi Arabia":         "KSA",
+    "United Arab Emirates": "UAE",
+}
+
+
 DAILY_PORT_CARGO_COLS = {
     "tanker":    "portcalls_tanker",
     "container": "portcalls_container",
@@ -46,14 +61,66 @@ DAILY_PORT_CARGO_COLS = {
 }
 
 
+# =============================================================================
+# @st.cache_data — memoise a VALUE (a DataFrame, list, dict, anything picklable)
+# + the mtime-keyed cache-invalidation trick
+# =============================================================================
+#
+# Core idea: every widget interaction reruns this whole script top-to-bottom.
+# Without caching, we'd reread the Parquet and rebuild the 7-day rolling
+# averages on every click — wasted work. @st.cache_data fixes that: hash the
+# arguments, and if we've seen that hash before, return the cached DataFrame
+# instantly instead of running the function again.
+#
+# Compare with @st.cache_resource (see solar/app.py get_loader):
+#   • cache_data     → memoises a VALUE. Pickled, copied per caller, safe to
+#                      mutate. Use for DataFrames, arrays, dicts, lists.
+#   • cache_resource → memoises an OBJECT. Singleton, shared by identity,
+#                      must not be mutated. Use for connections, loaders,
+#                      ML models.
+#
+# The clever bit on this specific function is the `mtime` argument. We don't
+# actually use it inside the function body — but because cache_data builds
+# its cache key by hashing the arguments, making mtime part of the signature
+# means the cache key changes whenever the Parquet file on disk is rewritten.
+# The load_daily_ports wrapper below passes DAILY_PORTS_PATH.stat().st_mtime,
+# so:
+#
+#   • File unchanged → same mtime → same cache key → cache hit, instant.
+#   • File rewritten → new mtime  → new cache key → cache miss, fresh read.
+#
+# This is event-driven invalidation instead of time-based. It's more precise
+# than `ttl=3600` (which we also set as a belt-and-braces safety net). If
+# your data updates on a schedule you don't control, this pattern is gold.
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_coastline_geojson() -> dict:
+    """Natural Earth 50m coastline, fetched once and cached on disk.
+
+    We keep a local copy under data/ so the app still works offline after the
+    first successful fetch. The mapbox layer expects an inline GeoJSON dict."""
+    local = DATA_DIR / "ne_50m_coastline.geojson"
+    if not local.exists():
+        url = (
+            "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/"
+            "master/geojson/ne_50m_coastline.geojson"
+        )
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                local.write_bytes(resp.read())
+        except Exception:
+            return {"type": "FeatureCollection", "features": []}
+    try:
+        return json.loads(local.read_text())
+    except Exception:
+        return {"type": "FeatureCollection", "features": []}
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _load_daily_ports_cached(mtime: float) -> pd.DataFrame:
-    # mtime is part of the cache key — when the parquet file is rewritten,
-    # Streamlit invalidates automatically.
     df = pd.read_parquet(DAILY_PORTS_PATH)
     df["date"] = pd.to_datetime(df["date"]).dt.normalize()
     df = df.sort_values(["portid", "date"])
-    # Pre-compute 7-day rolling averages for each cargo column AND the total,
+    # Pre-compute 7-day rolling averages for each cargo column AND the total
     # so map lookups are instant regardless of which ship-type filter is active.
     roll_cols = ["portcalls"] + [c for c in DAILY_PORT_CARGO_COLS.values() if c in df.columns]
     for col in roll_cols:
@@ -65,6 +132,8 @@ def _load_daily_ports_cached(mtime: float) -> pd.DataFrame:
 
 
 def load_daily_ports() -> pd.DataFrame:
+    """Thin wrapper: guards against a missing file, then passes the current
+    mtime into the cached loader so disk rewrites auto-invalidate the cache."""
     if not DAILY_PORTS_PATH.exists():
         return pd.DataFrame()
     return _load_daily_ports_cached(DAILY_PORTS_PATH.stat().st_mtime)
@@ -81,11 +150,33 @@ def load_ports() -> pd.DataFrame:
     return pd.DataFrame()
 
 
-# ─── DEMO [Hour 3]: the "CSV-once, Parquet-forever" trick ───────────────────
-# First run: read the CSV, narrow the dtypes, save as Parquet. Every future
-# run: read the Parquet directly — columnar, smaller, ~10x faster to load.
-# This is on top of @st.cache_data — the decorator caches within a session,
-# the Parquet file caches across sessions. Two layers, different lifetimes.
+# =============================================================================
+# CSV-once, Parquet-forever — a two-layer caching pattern
+# =============================================================================
+#
+# The first time this function runs, there's no Parquet file yet, so we do
+# the expensive thing: read the CSV, filter to Hormuz rows, narrow the dtypes
+# (category for repeated strings, int32 for small ints — drops memory ~4×
+# and makes the Parquet file tiny), and write the result back out as Parquet.
+#
+# Every run after that, the Parquet file exists, so we short-circuit straight
+# to pd.read_parquet(). Parquet is columnar and compressed — reading it is
+# roughly an order of magnitude faster than parsing a CSV.
+#
+# Stacked caching layers, from shortest lifetime to longest:
+#
+#   1. @st.cache_data       → within a running session, the DataFrame lives
+#                             in memory. No disk read at all on cache hit.
+#   2. The Parquet file     → survives across Streamlit reruns, app restarts,
+#                             even server reboots. Next cold start is still
+#                             ~10× faster than parsing the CSV.
+#   3. The CSV (fallback)   → the authoritative source. Only read when we
+#                             have to regenerate the Parquet.
+#
+# The `ttl=3600` on the decorator means the in-memory cache expires after an
+# hour, at which point we'll re-enter the function and hit layer 2 (Parquet).
+# That's the right trade-off for data that refreshes daily — we pick up a
+# fresh CSV eventually without hammering the disk on every session.
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_data() -> pd.DataFrame:
     if DATA_PARQUET.exists():
@@ -111,9 +202,9 @@ def load_data() -> pd.DataFrame:
     return df
 
 
-# ─── DEMO [Hour 1]: set_page_config MUST be the first Streamlit call ────────
-# Call it after any other st.* and you get an error. Sets the browser tab
-# title and the wide layout (default is centered).
+# set_page_config must be the first Streamlit call in the script.
+# Calling it after any other st.* function raises an error. Sets the browser
+# tab title and the wide layout (default is centered).
 st.set_page_config(
     page_title="Hormuz Transit Monitor",
     layout="wide",
@@ -156,12 +247,26 @@ st.markdown(
       [data-testid="stMetric"] {
           background: #0f172a;
           border: 1px solid #1e293b;
-          border-radius: 6px;
-          padding: 0.35rem 0.6rem !important;
+          border-radius: 4px;
+          padding: 0.15rem 0.35rem !important;
+          min-width: 0 !important;
       }
-      [data-testid="stMetricValue"] { font-size: 1.15rem !important; line-height: 1.1 !important; color: #f1f5f9 !important; }
-      [data-testid="stMetricLabel"] { font-size: 0.68rem !important; color: #94a3b8 !important; }
-      [data-testid="stMetricDelta"] { font-size: 0.65rem !important; }
+      [data-testid="stMetricValue"] {
+          font-size: 0.82rem !important;
+          line-height: 1.0 !important;
+          color: #f1f5f9 !important;
+      }
+      [data-testid="stMetricLabel"] {
+          font-size: 0.55rem !important;
+          color: #94a3b8 !important;
+          line-height: 1.0 !important;
+      }
+      [data-testid="stMetricLabel"] p { font-size: 0.55rem !important; }
+      [data-testid="stMetricDelta"] {
+          font-size: 0.52rem !important;
+          line-height: 1.0 !important;
+      }
+      [data-testid="stMetricDelta"] svg { width: 0.6rem !important; height: 0.6rem !important; }
       [data-testid="stCaptionContainer"] { margin-top: 0 !important; }
       /* Input widgets keep the dark background */
       [data-baseweb="input"], [data-baseweb="select"] > div { background: #0f172a !important; }
@@ -171,6 +276,31 @@ st.markdown(
       div[data-testid="stVerticalBlock"] > div { gap: 0.35rem !important; }
       [data-testid="stSlider"] { padding: 0 !important; }
       section[data-testid="stSidebar"] .block-container { padding-top: 1rem !important; }
+      /* Map wrapper: a span.pw-map-anchor sits in an stElementContainer
+         immediately before the plotly map. The :has() + sibling rule paints
+         the next element-container (the map) with a thin white border. */
+      [data-testid="stElementContainer"]:has(.pw-map-anchor) {
+          display: none !important;
+      }
+      [data-testid="stElementContainer"]:has(.pw-map-anchor) + [data-testid="stElementContainer"] {
+          border: 2px solid #ffffff !important;
+          border-radius: 4px !important;
+          padding: 3px !important;
+          background: #0b1220 !important;
+          box-sizing: border-box !important;
+      }
+      /* Chart column section headings — centered, a bit larger */
+      .chart-heading {
+          color: #e2e8f0;
+          font-size: 1.05rem;
+          font-weight: 700;
+          letter-spacing: 0.03em;
+          text-transform: uppercase;
+          text-align: center;
+          border-bottom: 1px solid #1e293b;
+          padding: 0.15rem 0 0.2rem 0;
+          margin: 0.35rem 0 0.3rem 0;
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -195,33 +325,49 @@ min_d, max_d = df.date.min().date(), df.date.max().date()
 default_start = max(min_d, max_d - timedelta(days=365))
 ship_types = sorted(df.cargo_type.dropna().unique().tolist())
 
-# Reserve a slot at the top for the main row (map + charts). We'll fill it
-# at the end, once the filter values and daily stats are known. Everything
-# rendered between now and then appears BELOW this slot visually.
-main_slot = st.empty()
+# Main row: two columns. Each uses st.empty() placeholders so we can fill in
+# two passes. The top-of-chart widgets (date range + smoothing) render RIGHT
+# NOW so their values feed the filter/aggregate code below. The rest of
+# chart_col (Map-date slider, time series) and map_col are filled later, once
+# aggregates + the selected day are known.
+map_col, chart_col = st.columns([1, 1], gap="medium")
+with chart_col:
+    top_widgets_slot = st.empty()
+    rest_slot = st.empty()
+with map_col:
+    map_slot = st.empty()
+    ship_types_slot = st.empty()
+    kpi_slot = st.empty()
 
-# ──────────────────────────────── Compact bottom bar ────────────────────────
-bc1, bc2, bc3 = st.columns([2, 3, 6], gap="small")
-with bc1:
-    date_range = st.date_input(
-        "Date range",
-        value=(default_start, max_d),
-        min_value=min_d,
-        max_value=max_d,
-    )
-with bc2:
+# Fixed 7-day rolling window for every "rolling / avg" visual on the page.
+# We pre-compute this once at load time inside _load_daily_ports_cached
+# (see portcalls_*_roll7 columns) so the map and the trend line use the
+# exact same window. If you ever want to make it configurable again, turn
+# this into a slider and remove the pre-compute from the cached loader.
+ROLLING_WINDOW = 7
+
+with top_widgets_slot.container():
+    # Narrow, centred date-range picker that sits directly above the red
+    # Map-date slider. Flanking empty columns do the centring.
+    _dl, _dm, _dr = st.columns([2, 3, 2], gap="small")
+    with _dm:
+        date_range = st.date_input(
+            "Date range",
+            value=(default_start, max_d),
+            min_value=min_d,
+            max_value=max_d,
+        )
+
+# Ship-types filter renders into a slot below the map (map_col). It sits in
+# the empty space under the map and to the left of the bar chart. We fill
+# the slot RIGHT NOW so selected_types is available to the filter code below.
+with ship_types_slot.container():
     selected_types = st.multiselect(
         "Ship types",
         options=ship_types,
         default=ship_types,
     )
-with bc3:
-    kpi_slots = list(st.columns(4))
 
-# Smoothing slider renders later (between the two time series). Read its
-# previous value from session state so the rolling-average computation below
-# can proceed before the widget is drawn. Default 7 on first render.
-rolling_window = int(st.session_state.get("smoothing_slider", 7))
 
 # Guard against the mid-selection single-date blip st.date_input can return.
 if isinstance(date_range, tuple) and len(date_range) == 2:
@@ -246,7 +392,38 @@ daily = (
        .sort_values("date")
        .reset_index(drop=True)
 )
-daily["rolling"] = daily["transits"].rolling(rolling_window, min_periods=1).mean()
+daily["rolling"] = daily["transits"].rolling(ROLLING_WINDOW, min_periods=1).mean()
+
+# Per-day cargo-type breakdown embedded as a monospaced Unicode bar chart in
+# the hover tooltip of the Daily trace. Plotly hovers are text-only (no SVG),
+# but with hoverlabel.font.family = "Courier New" the block characters align
+# cleanly. Each day's tooltip shows every cargo type in the current filter,
+# with a 10-char █ bar scaled to the GLOBAL max (so day-to-day comparison is
+# meaningful) and the integer count on the right.
+day_pivot = fdf.pivot_table(
+    index="date", columns="cargo_type", values="transits",
+    aggfunc="sum", fill_value=0, observed=True,
+)
+cargo_order = day_pivot.sum(axis=0).sort_values(ascending=False).index.tolist()
+day_pivot = day_pivot[cargo_order]
+_bar_max = float(day_pivot.to_numpy().max()) or 1.0
+_BAR_W = 10
+_LABEL_W = max((len(c) for c in cargo_order), default=8) + 2
+
+
+def _breakdown_text(row) -> str:
+    lines = []
+    for col in cargo_order:
+        val = int(row[col])
+        filled = int(round(_BAR_W * val / _bar_max))
+        bar = ("█" * filled).ljust(_BAR_W)
+        lines.append(f"{col:<{_LABEL_W}}{bar} {val:>4}")
+    return "<br>".join(lines)
+
+
+daily["breakdown"] = daily["date"].map(
+    lambda d: _breakdown_text(day_pivot.loc[d]) if d in day_pivot.index else ""
+)
 
 latest_val = float(daily["transits"].iloc[-1])
 avg_7 = float(daily["transits"].tail(7).mean())
@@ -261,172 +438,244 @@ year_ago = float(ya_window["transits"].mean()) if not ya_window.empty else float
 slider_min = daily["date"].iloc[0].to_pydatetime()
 slider_max = daily["date"].iloc[-1].to_pydatetime()
 
-# Everything below is rendered inside main_slot, which sits at the top of the
-# page. This lets the bottom bar (filters + KPIs) stay at the bottom in DOM
-# order while still producing values this section depends on.
-with main_slot.container():
-    map_col, chart_col = st.columns([1, 1], gap="medium")
+# Fill rest_slot (chart_col below the widgets row) with the blue time series,
+# the Map-date slider, and the cargo-type bar chart. Each section is wrapped
+# with a chart-heading so the two panels read as distinct graphs.
+with rest_slot.container():
+    # Map-date slider FIRST (above the heading), then the centered heading,
+    # then the chart itself. This keeps the primary control above the thing
+    # it controls and puts the chart title directly over the chart.
+    if slider_min == slider_max:
+        selected_day = slider_max
+    else:
+        selected_day = st.slider(
+            "Map date",
+            min_value=slider_min,
+            max_value=slider_max,
+            value=slider_max,
+            format="YYYY-MM-DD",
+            step=timedelta(days=1),
+            label_visibility="collapsed",
+        )
+    st.markdown("<div class='chart-heading'>Daily transits through Hormuz</div>", unsafe_allow_html=True)
 
-    with chart_col:
-        if slider_min == slider_max:
-            selected_day = slider_max
-        else:
-            selected_day = st.slider(
-                "Map date",
-                min_value=slider_min,
-                max_value=slider_max,
-                value=slider_max,
-                format="YYYY-MM-DD",
-                step=timedelta(days=1),
-                label_visibility="collapsed",
-            )
+    selected_day_ts = pd.Timestamp(selected_day).normalize()
+    day_row = daily[daily["date"] == selected_day_ts]
+    day_val = float(day_row["transits"].iloc[0]) if not day_row.empty else 0.0
+    day_rolling = float(day_row["rolling"].iloc[0]) if not day_row.empty else 0.0
+    total_transits = int(fdf["transits"].sum())
+    days_covered = int(daily.shape[0])
 
-        selected_day_ts = pd.Timestamp(selected_day).normalize()
-        day_row = daily[daily["date"] == selected_day_ts]
-        day_val = float(day_row["transits"].iloc[0]) if not day_row.empty else 0.0
-        day_rolling = float(day_row["rolling"].iloc[0]) if not day_row.empty else 0.0
-        total_transits = int(fdf["transits"].sum())
-        days_covered = int(daily.shape[0])
-
-        fig_ts = px.line(
-            daily, x="date", y=["transits", "rolling"],
-            labels={"value": "Transits / day", "date": "", "variable": ""},
-        )
-        fig_ts.data[0].name = "Daily"
-        fig_ts.data[1].name = f"{rolling_window}-day avg"
-        fig_ts.update_traces(
-            hovertemplate="%{x|%Y-%m-%d}<br>%{y:.0f}<extra>%{fullData.name}</extra>"
-        )
-        fig_ts.add_vline(
-            x=selected_day_ts, line_width=1, line_dash="dot", line_color="#f87171"
-        )
-        fig_ts.update_layout(
-            height=185,
-            margin=dict(l=0, r=0, t=5, b=20),
-            paper_bgcolor="#0b1220",
-            plot_bgcolor="#0b1220",
-            font=dict(color="#cbd5e1", size=11),
-            xaxis=dict(
-                gridcolor="#1e293b",
-                showgrid=True,
-                tickfont=dict(size=12, color="#e2e8f0"),
-                tickformat="%b %Y",
-                nticks=6,
-            ),
-            yaxis=dict(gridcolor="#1e293b", showgrid=True, title=None, tickfont=dict(size=11)),
-            legend=dict(orientation="h", y=1.2, x=1, xanchor="right", font=dict(size=10)),
-        )
-        ts_event = st.plotly_chart(
-            fig_ts,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="points",
-            key="ts_chart",
-            config={"displayModeBar": False, "scrollZoom": False},
-        )
-
-        by_type = fdf.groupby(["date", "cargo_type"], as_index=False, observed=True)["transits"].sum()
-        fig_bar = px.bar(
-            by_type, x="date", y="transits", color="cargo_type",
-            color_discrete_map=SHIP_TYPE_COLORS,
-            labels={"transits": "Transits", "date": "", "cargo_type": "Ship type"},
-        )
-        fig_bar.add_vline(
-            x=selected_day_ts, line_width=1, line_dash="dot", line_color="#f87171"
-        )
-        fig_bar.update_layout(
-            height=185,
-            margin=dict(l=0, r=0, t=5, b=20),
-            paper_bgcolor="#0b1220",
-            plot_bgcolor="#0b1220",
-            font=dict(color="#cbd5e1", size=11),
-            xaxis=dict(
-                gridcolor="#1e293b",
-                showgrid=False,
-                tickfont=dict(size=12, color="#e2e8f0"),
-                tickformat="%b %Y",
-                nticks=6,
-            ),
-            yaxis=dict(gridcolor="#1e293b", showgrid=True, title=None, tickfont=dict(size=11)),
-        barmode="stack",
-        legend=dict(orientation="h", y=1.2, x=1, xanchor="right", font=dict(size=9), title=None),
+    fig_ts = px.line(
+        daily, x="date", y=["transits", "rolling"],
+        labels={"value": "Transits / day", "date": "", "variable": ""},
     )
-        st.plotly_chart(fig_bar, use_container_width=True, config={"displayModeBar": False})
+    fig_ts.data[0].name = "Daily"
+    fig_ts.data[0].mode = "lines+markers"
+    fig_ts.data[0].marker = dict(size=5, color="#60a5fa")
+    # Attach the pre-computed per-day breakdown text as customdata on the
+    # Daily trace, then reference it from the hover template. The Rolling
+    # trace keeps its simple text hover.
+    fig_ts.data[0].customdata = daily["breakdown"].to_numpy().reshape(-1, 1)
+    fig_ts.data[0].hovertemplate = (
+        "<b>%{x|%Y-%m-%d}</b>  ·  %{y:.0f} transits<br>"
+        "<span style='color:#94a3b8'>─────────────────</span><br>"
+        "%{customdata[0]}"
+        "<extra></extra>"
+    )
+    fig_ts.data[1].name = f"{ROLLING_WINDOW}-day avg (fixed)"
+    fig_ts.data[1].hovertemplate = (
+        "%{x|%Y-%m-%d}<br>%{y:.1f}<extra>%{fullData.name}</extra>"
+    )
+    fig_ts.add_vline(
+        x=selected_day_ts, line_width=1, line_dash="dot", line_color="#f87171"
+    )
+    # Shared x-axis range + fixed left/right margins so this chart and the
+    # bar chart below line up pixel-for-pixel (and the red vlines match).
+    _x_min = daily["date"].min()
+    _x_max = daily["date"].max()
+    fig_ts.update_layout(
+        height=185,
+        margin=dict(l=52, r=12, t=5, b=20),
+        paper_bgcolor="#0b1220",
+        plot_bgcolor="#0b1220",
+        font=dict(color="#cbd5e1", size=11),
+        xaxis=dict(
+            gridcolor="#1e293b",
+            showgrid=True,
+            tickfont=dict(size=12, color="#e2e8f0"),
+            tickformat="%b %Y",
+            nticks=6,
+            range=[_x_min, _x_max],
+        ),
+        yaxis=dict(gridcolor="#1e293b", showgrid=True, title=None, tickfont=dict(size=11)),
+        legend=dict(orientation="h", y=1.2, x=1, xanchor="right", font=dict(size=10)),
+        # Monospace hover so the per-day bar chart in the tooltip aligns.
+        hoverlabel=dict(
+            bgcolor="#0f172a",
+            bordercolor="#475569",
+            font=dict(family="Courier New, monospace", size=12, color="#e2e8f0"),
+            align="left",
+        ),
+    )
+    st.plotly_chart(
+        fig_ts,
+        use_container_width=True,
+        key="ts_chart",
+        config={"displayModeBar": False, "scrollZoom": False},
+    )
 
-    # ───────────────────────── Map (left half of main row) ─────────────────
-    with map_col:
-        import numpy as np
+    st.markdown("<div class='chart-heading'>Transits by cargo type</div>", unsafe_allow_html=True)
 
-        fig_map = go.Figure()
+    by_type = fdf.groupby(["date", "cargo_type"], as_index=False, observed=True)["transits"].sum()
+    fig_bar = px.bar(
+        by_type, x="date", y="transits", color="cargo_type",
+        color_discrete_map=SHIP_TYPE_COLORS,
+        labels={"transits": "Transits", "date": "", "cargo_type": "Ship type"},
+    )
+    fig_bar.add_vline(
+        x=selected_day_ts, line_width=1, line_dash="dot", line_color="#f87171"
+    )
+    fig_bar.update_layout(
+        height=185,
+        margin=dict(l=52, r=12, t=5, b=20),
+        paper_bgcolor="#0b1220",
+        plot_bgcolor="#0b1220",
+        font=dict(color="#cbd5e1", size=11),
+        xaxis=dict(
+            gridcolor="#1e293b",
+            showgrid=False,
+            tickfont=dict(size=12, color="#e2e8f0"),
+            tickformat="%b %Y",
+            nticks=6,
+            range=[_x_min, _x_max],
+        ),
+        yaxis=dict(gridcolor="#1e293b", showgrid=True, title=None, tickfont=dict(size=11)),
+        barmode="stack",
+        legend=dict(orientation="h", y=1.4, x=1, xanchor="right", font=dict(size=10), title=None),
+    )
+    st.plotly_chart(fig_bar, use_container_width=True, config={"displayModeBar": False})
 
-        if not ports_df.empty:
-            gulf_ports = ports_df[ports_df["lon"] < 56.3]
-            conn_lats: list[float | None] = []
-            conn_lons: list[float | None] = []
-            for _, row in gulf_ports.iterrows():
-                conn_lats += [row["lat"], HORMUZ_LAT, None]
-                conn_lons += [row["lon"], HORMUZ_LON, None]
-            fig_map.add_trace(go.Scattergeo(
-                lat=conn_lats,
-                lon=conn_lons,
-                mode="lines",
-                line=dict(color="rgba(148,163,184,0.35)", width=1),
-                name=f"Must transit Hormuz (n={len(gulf_ports)})",
-                hoverinfo="skip",
-            ))
+# ───────────────────────── Map (left half of main row) ─────────────────
+with map_slot.container():
+    import numpy as np
 
-        if not ports_df.empty:
-            if not daily_ports.empty:
-                available = set(DAILY_PORT_CARGO_COLS)
-                matched = set(selected_types) & available
-                day_frame = daily_ports[daily_ports["date"] == selected_day_ts]
-                if matched:
-                    sum_cols = [f"{DAILY_PORT_CARGO_COLS[t]}_roll7" for t in matched]
-                    day_snapshot = day_frame.set_index("portid")[sum_cols].sum(axis=1)
-                    metric_label = (
-                        f"7-day avg calls · {', '.join(sorted(matched))} · {selected_day_ts.date()}"
-                    )
-                else:
-                    day_snapshot = day_frame.set_index("portid")["portcalls_roll7"] * 0.0
-                    metric_label = "No per-port data for the selected ship types"
-                port_metric = ports_df["portid"].map(day_snapshot).fillna(0.0).to_numpy()
+    # Push the map down so it lines up visually with the chart-column content
+    # (widgets row + first chart heading).
+    st.markdown("<div style='height: 1.95rem'></div>", unsafe_allow_html=True)
+
+    # Drop a marker anchor right before the plotly chart. CSS below uses
+    # :has() to target the *next* stElementContainer — the map — and paint
+    # a thin white border around it.
+    st.markdown("<span class='pw-map-anchor'></span>", unsafe_allow_html=True)
+
+    fig_map = go.Figure()
+
+    if not ports_df.empty:
+        if not daily_ports.empty:
+            available = set(DAILY_PORT_CARGO_COLS)
+            matched = set(selected_types) & available
+            day_frame = daily_ports[daily_ports["date"] == selected_day_ts]
+            if matched:
+                sum_cols = [f"{DAILY_PORT_CARGO_COLS[t]}_roll7" for t in matched]
+                day_snapshot = day_frame.set_index("portid")[sum_cols].sum(axis=1)
+                metric_label = (
+                    f"{ROLLING_WINDOW}-day avg calls (fixed) · "
+                    f"{', '.join(sorted(matched))} · {selected_day_ts.date()}"
+                )
             else:
-                port_metric = ports_df["vessel_count_total"].fillna(0).to_numpy()
-                metric_label = "Total vessel count (all time)"
+                day_snapshot = day_frame.set_index("portid")["portcalls_roll7"] * 0.0
+                metric_label = "No per-port data for the selected ship types"
+            port_metric = ports_df["portid"].map(day_snapshot).fillna(0.0).to_numpy()
+        else:
+            port_metric = ports_df["vessel_count_total"].fillna(0).to_numpy()
+            metric_label = "Total vessel count (all time)"
 
-            max_metric = max(float(port_metric.max()), 1.0)
-            sizes = 5.0 + 26.0 * np.sqrt(port_metric / max_metric)
+        max_metric = max(float(port_metric.max()), 1.0)
+        sizes = 5.0 + 26.0 * np.sqrt(port_metric / max_metric)
 
-            top_idx = set(np.argsort(-port_metric)[:10].tolist())
-            labels = [
-                row["portname"] if i in top_idx else ""
-                for i, row in ports_df.reset_index(drop=True).iterrows()
-            ]
+        # Attach computed metric + size onto ports_df so we can slice by
+        # country for the per-country traces (one trace = one legend row).
+        ports_plot = ports_df.reset_index(drop=True).copy()
+        ports_plot["__metric"] = port_metric
+        ports_plot["__size"] = sizes
+        top_idx = set(np.argsort(-port_metric)[:10].tolist())
+        ports_plot["__label"] = [
+            row["portname"] if i in top_idx else ""
+            for i, row in ports_plot.iterrows()
+        ]
 
-            customdata = list(zip(
-                ports_df["portname"].fillna("—"),
-                ports_df["country"].fillna("—"),
-                port_metric,
-                ports_df["vessel_count_total"].fillna(0).astype(int),
-                ports_df["industry_top1"].fillna("—"),
+        # Route spokes: one line per Gulf-side port → Hormuz, width scaled
+        # by that port's metric, coloured by its country so the flow map
+        # reads the same colour-key as the bubbles.
+        gulf = ports_plot[ports_plot["lon"] < 56.3]
+        for _, row in gulf.iterrows():
+            m = float(row["__metric"])
+            width = 0.6 + 5.5 * np.sqrt(m / max_metric)
+            colour_line = COUNTRY_COLORS.get(row["country"], "#94a3b8")
+            fig_map.add_trace(go.Scattermapbox(
+                lat=[row["lat"], HORMUZ_LAT],
+                lon=[row["lon"], HORMUZ_LON],
+                mode="lines",
+                line=dict(color=colour_line, width=width),
+                opacity=0.65,
+                hoverinfo="skip",
+                showlegend=False,
             ))
 
-            fig_map.add_trace(go.Scattergeo(
-                lat=ports_df["lat"],
-                lon=ports_df["lon"],
-                text=labels,
+        # Stable country ordering: put the ones we have colours for first,
+        # then any stragglers — so the legend looks predictable.
+        country_order = [c for c in COUNTRY_COLORS if c in ports_plot["country"].unique()]
+        country_order += [
+            c for c in ports_plot["country"].dropna().unique()
+            if c not in COUNTRY_COLORS
+        ]
+
+        # White outline halo underneath every port bubble. Scattermapbox
+        # markers have no `marker.line` support, so we fake an outline by
+        # plotting every port twice: first as a slightly larger white dot,
+        # then the coloured country dot on top. The size bump is 2.6 px
+        # which reads as a clean ~1 px ring around each bubble.
+        fig_map.add_trace(go.Scattermapbox(
+            lat=ports_plot["lat"],
+            lon=ports_plot["lon"],
+            mode="markers",
+            marker=dict(
+                size=(ports_plot["__size"] + 2.6).tolist(),
+                color="#ffffff",
+                opacity=0.95,
+            ),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+
+        for country in country_order:
+            group = ports_plot[ports_plot["country"] == country]
+            if group.empty:
+                continue
+            colour = COUNTRY_COLORS.get(country, "#94a3b8")
+            customdata = list(zip(
+                group["portname"].fillna("—"),
+                group["country"].fillna("—"),
+                group["__metric"],
+                group["vessel_count_total"].fillna(0).astype(int),
+                group["industry_top1"].fillna("—"),
+            ))
+            fig_map.add_trace(go.Scattermapbox(
+                lat=group["lat"],
+                lon=group["lon"],
+                text=group["__label"],
                 customdata=customdata,
                 mode="markers+text",
-                textposition="top center",
-                textfont=dict(color="#cbd5e1", size=10),
+                textposition="top right",
+                textfont=dict(color="#f8fafc", size=11),
                 marker=dict(
-                    size=sizes.tolist(),
-                    color="#38bdf8",
-                    opacity=0.85,
-                    line=dict(color="#0c4a6e", width=1),
-                    symbol="circle",
+                    size=group["__size"].tolist(),
+                    color=colour,
+                    opacity=0.95,
                 ),
-                name=metric_label,
+                name=COUNTRY_LABELS.get(country, country),
+                legendgroup=country,
                 hovertemplate=(
                     "<b>%{customdata[0]}</b> — %{customdata[1]}<br>"
                     "Port calls (7-day avg): %{customdata[2]:.1f}<br>"
@@ -436,71 +685,209 @@ with main_slot.container():
                 ),
             ))
 
-        fig_map.add_trace(go.Scattergeo(
-            lat=[HORMUZ_LAT],
-            lon=[HORMUZ_LON],
-            mode="markers",
-            marker=dict(
-                size=max(22, min(70, day_val * 0.7)),
-                color="rgba(239,68,68,0.55)",
-                line=dict(color="#fecaca", width=2),
-                symbol="circle",
-            ),
-            name="Chokepoint",
-            hovertemplate=(
-                "<b>Strait of Hormuz</b><br>"
-                f"{selected_day_ts.date()}: {day_val:.0f} transits<br>"
-                f"{rolling_window}-day avg here: {day_rolling:.1f}<br>"
-                f"Filter total: {total_transits:,} over {days_covered} days"
-                "<extra></extra>"
-            ),
+    # Hormuz chokepoint marker — bullseye with glow.
+    #
+    # Scattermapbox markers can't have outline strokes, so we build the
+    # bullseye out of multiple lat/lon circle traces:
+    #   • Four soft filled halos at increasing radii fading to transparent
+    #     (this creates the radial "glow")
+    #   • Three sharp concentric ring line traces in fiery red shades
+    #   • A small bright center dot
+    import math
+
+    def _latlon_ring(center_lat: float, center_lon: float, radius_deg: float, n: int = 96):
+        """Return (lats, lons) for a closed circle around a lat/lon center.
+        Corrects longitude spacing for latitude so the ring looks round on the map."""
+        theta = np.linspace(0, 2 * np.pi, n)
+        lon_scale = 1.0 / math.cos(math.radians(center_lat))
+        lats = (center_lat + radius_deg * np.cos(theta)).tolist()
+        lons = (center_lon + radius_deg * np.sin(theta) * lon_scale).tolist()
+        return lats, lons
+
+    # Soft glow halos — filled circles at increasing radii. Dark red-950 at
+    # the outermost radius fading into hot red-500 toward the core, so the
+    # glow reads as heat building up around the centre instead of a flat
+    # pink wash. Drawn first so everything else sits on top.
+    glow_layers = [
+        (1.30, "rgba(69, 10, 10, 0.28)"),    # red-950 — deepest outer
+        (1.05, "rgba(127, 29, 29, 0.34)"),   # red-900
+        (0.82, "rgba(185, 28, 28, 0.42)"),   # red-700
+        (0.62, "rgba(220, 38, 38, 0.52)"),   # red-600
+        (0.44, "rgba(239, 68, 68, 0.62)"),   # red-500 — hot inner halo
+    ]
+    for radius_deg, rgba in glow_layers:
+        g_lats, g_lons = _latlon_ring(HORMUZ_LAT, HORMUZ_LON, radius_deg)
+        fig_map.add_trace(go.Scattermapbox(
+            lat=g_lats,
+            lon=g_lons,
+            mode="lines",
+            fill="toself",
+            fillcolor=rgba,
+            line=dict(width=0, color=rgba),
+            hoverinfo="skip",
+            showlegend=False,
         ))
 
-        fig_map.update_geos(
-            projection_type="natural earth",
-            center=dict(lat=26.0, lon=54.0),
-            lataxis_range=[22, 32],
-            lonaxis_range=[46, 62],
-            showcountries=True, countrycolor="#64748b", countrywidth=0.8,
-            showcoastlines=True, coastlinecolor="#94a3b8", coastlinewidth=0.8,
-            showland=True, landcolor="#1e293b",
-            showocean=True, oceancolor="#0b1220",
-            showlakes=False,
-            resolution=50,
-            bgcolor="#0b1220",
-        )
-        fig_map.update_layout(
-            height=430,
-            margin=dict(l=0, r=0, t=0, b=0),
-            paper_bgcolor="#0b1220",
-            plot_bgcolor="#0b1220",
+    # Three sharp concentric rings — proper flame gradient from deep crimson
+    # outer → vivid red middle → hot orange inner. Widths thicken toward
+    # the centre so the eye reads a clean bullseye.
+    concentric_rings = [
+        (0.48, "#991b1b", 2.0),  # outer  — deep crimson (red-800)
+        (0.30, "#ef4444", 3.0),  # middle — vivid red    (red-500)
+        (0.15, "#f97316", 3.5),  # inner  — hot orange   (orange-500)
+    ]
+    for radius_deg, color, width in concentric_rings:
+        r_lats, r_lons = _latlon_ring(HORMUZ_LAT, HORMUZ_LON, radius_deg)
+        fig_map.add_trace(go.Scattermapbox(
+            lat=r_lats,
+            lon=r_lons,
+            mode="lines",
+            line=dict(width=width, color=color),
+            hoverinfo="skip",
             showlegend=False,
-        )
-        st.plotly_chart(
-            fig_map,
-            use_container_width=True,
-            config={
-                "scrollZoom": False,
-                "displayModeBar": True,
-                "displaylogo": False,
-                "modeBarButtonsToRemove": ["lasso2d", "select2d"],
-                "doubleClick": "reset",
-            },
-        )
+        ))
 
-# Fill the KPI cards in the bottom bar now that slider-dependent stats exist.
-kpi_slots[0].metric(
-    f"{selected_day_ts.date()}",
-    f"{day_val:.0f}",
-    delta=f"{day_val - avg_7:+.0f}",
-)
-kpi_slots[1].metric("7-day avg", f"{avg_7:.1f}")
-kpi_slots[2].metric("30-day avg", f"{avg_30:.1f}")
-if pd.isna(year_ago) or year_ago == 0:
-    kpi_slots[3].metric("Year-ago", "—")
-else:
-    kpi_slots[3].metric(
-        "Year-ago",
-        f"{year_ago:.1f}",
-        delta=f"{((latest_val / year_ago) - 1) * 100:+.1f}%",
+    # Stacked centre dots so the core looks white-hot. A real flame's
+    # hottest visible core is yellow-white, wrapped in orange, wrapped in
+    # red — three marker traces at the same lat/lon build that up. The
+    # topmost (brightest) dot carries the hover tooltip.
+    _core_size = max(10, min(24, 6 + day_val * 0.18))
+    fig_map.add_trace(go.Scattermapbox(  # deep red background dot
+        lat=[HORMUZ_LAT], lon=[HORMUZ_LON], mode="markers",
+        marker=dict(size=_core_size + 10, color="#dc2626", opacity=0.95),
+        hoverinfo="skip", showlegend=False,
+    ))
+    fig_map.add_trace(go.Scattermapbox(  # hot orange mid layer
+        lat=[HORMUZ_LAT], lon=[HORMUZ_LON], mode="markers",
+        marker=dict(size=_core_size + 5, color="#f97316", opacity=0.95),
+        hoverinfo="skip", showlegend=False,
+    ))
+    fig_map.add_trace(go.Scattermapbox(  # yellow-white hottest core + tooltip
+        lat=[HORMUZ_LAT], lon=[HORMUZ_LON], mode="markers",
+        marker=dict(size=_core_size, color="#fde047", opacity=1.0),
+        name="Hormuz chokepoint",
+        showlegend=False,
+        hovertemplate=(
+            "<b>Strait of Hormuz</b><br>"
+            f"{selected_day_ts.date()}: {day_val:.0f} transits<br>"
+            f"{ROLLING_WINDOW}-day avg here: {day_rolling:.1f}<br>"
+            f"Filter total: {total_transits:,} over {days_covered} days"
+            "<extra></extra>"
+        ),
+    ))
+
+    # Esri World Imagery — free satellite raster tiles, no token required.
+    fig_map.update_layout(
+        mapbox=dict(
+            # Dark carto base shows through the tinted satellite raster,
+            # giving us a darker map so overlaid bubbles/lines pop.
+            style="carto-darkmatter",
+            layers=[
+                {
+                    "below": "traces",
+                    "sourcetype": "raster",
+                    "sourceattribution": "Esri, Maxar, Earthstar Geographics",
+                    "source": [
+                        "https://server.arcgisonline.com/ArcGIS/rest/services/"
+                        "World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                    ],
+                    "opacity": 0.38,
+                },
+                # Translucent blue wash over the satellite imagery, still
+                # below the trace layer so bubbles/lines stay crisp.
+                {
+                    "below": "traces",
+                    "sourcetype": "geojson",
+                    "type": "fill",
+                    "color": "#0b1a3a",
+                    "opacity": 0.35,
+                    "source": {
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [[
+                                [20, -10], [80, -10],
+                                [80, 50], [20, 50], [20, -10],
+                            ]],
+                        },
+                    },
+                },
+                # Esri reference tiles: transparent raster with country
+                # borders + place labels. Drawn above the blue wash so
+                # the borders "pop" against the darkened map.
+                {
+                    "below": "traces",
+                    "sourcetype": "raster",
+                    "source": [
+                        "https://server.arcgisonline.com/ArcGIS/rest/services/"
+                        "Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
+                    ],
+                    "opacity": 0.85,
+                },
+                # Crisp vector coastline (Natural Earth 50m) so the
+                # land/water edge reads even at low raster opacity.
+                {
+                    "below": "traces",
+                    "sourcetype": "geojson",
+                    "type": "line",
+                    "color": "#f8fafc",
+                    "opacity": 0.9,
+                    "line": {"width": 1.2},
+                    "source": load_coastline_geojson(),
+                },
+            ],
+            center=dict(lat=25.5, lon=55.0),
+            zoom=4.4,
+        ),
+        height=420,
+        margin=dict(l=0, r=0, t=0, b=24),
+        paper_bgcolor="#0b1220",
+        plot_bgcolor="#0b1220",
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            x=0.5, y=-0.02, xanchor="center", yanchor="top",
+            bgcolor="rgba(11,18,32,0.0)",
+            bordercolor="#334155",
+            borderwidth=0,
+            font=dict(color="#e2e8f0", size=9),
+            itemsizing="constant",
+            itemwidth=30,
+            tracegroupgap=2,
+            title=dict(text="", font=dict(size=9, color="#cbd5e1")),
+        ),
     )
+    st.plotly_chart(
+        fig_map,
+        use_container_width=True,
+        config={
+            "scrollZoom": True,
+            "displayModeBar": True,
+            "displaylogo": False,
+            "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+            "doubleClick": "reset",
+        },
+    )
+
+# KPI cards render into the slot below the ship-types filter (map_col). The
+# .pw-mini-metrics wrapper shrinks the metric component via CSS so all four
+# fit under the narrow left column instead of spanning the page.
+with kpi_slot.container():
+    st.markdown("<div class='pw-mini-metrics'>", unsafe_allow_html=True)
+    mk1, mk2, mk3, mk4 = st.columns(4, gap="small")
+    mk1.metric(
+        f"{selected_day_ts.date()}",
+        f"{day_val:.0f}",
+        delta=f"{day_val - avg_7:+.0f}",
+    )
+    mk2.metric("7-day avg", f"{avg_7:.1f}")
+    mk3.metric("30-day avg", f"{avg_30:.1f}")
+    if pd.isna(year_ago) or year_ago == 0:
+        mk4.metric("Year-ago", "—")
+    else:
+        mk4.metric(
+            "Year-ago",
+            f"{year_ago:.1f}",
+            delta=f"{((latest_val / year_ago) - 1) * 100:+.1f}%",
+        )
+    st.markdown("</div>", unsafe_allow_html=True)

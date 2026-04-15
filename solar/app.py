@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -59,26 +60,25 @@ BODIES: list[tuple[str, str, str | None]] = [
     ("Pluto",   "pluto_lon",   "pluto_lat"),
 ]
 
-# Twelve evenly-spaced hues around the color wheel — 30° apart, starting
-# at Aries = red. Each entry is HSL(hue, 75%, 55%) converted to hex, so
-# the saturation and lightness are constant and the only thing changing
-# is hue. This gives a true rainbow ring that maps 1:1 onto the zodiac
-# ring, with warm signs (Aries/Leo) in the red-orange band, cool signs
-# (Libra/Aquarius) in the cyan-blue band, and the ring closing back at
-# Pisces → Aries.
+# Traditional zodiac-sign colors — each chosen to echo the sign's
+# classical association (element + ruling planet + folklore), while
+# staying saturated enough to read on a dark background and distinct
+# from the pale BODY_COLORS (which live in the 85% lightness band).
+# Sign colors live in the 40–55% lightness band, ~60–80% saturation,
+# so there's no visual collision between a body dot and its sign arc.
 SIGN_COLORS = [
-    "#e23636",  # Aries        hue   0° — red
-    "#e28c36",  # Taurus       hue  30° — orange
-    "#e2e236",  # Gemini       hue  60° — yellow
-    "#8ce236",  # Cancer       hue  90° — lime
-    "#36e236",  # Leo          hue 120° — green
-    "#36e28c",  # Virgo        hue 150° — spring green
-    "#36e2e2",  # Libra        hue 180° — cyan
-    "#368ce2",  # Scorpio      hue 210° — azure
-    "#3636e2",  # Sagittarius  hue 240° — blue
-    "#8c36e2",  # Capricorn    hue 270° — violet
-    "#e236e2",  # Aquarius     hue 300° — magenta
-    "#e2368c",  # Pisces       hue 330° — pink
+    "#c92a2a",  # Aries        — fire / Mars          : crimson red
+    "#5c8a3f",  # Taurus       — earth / Venus        : olive green
+    "#d4a017",  # Gemini       — air / Mercury        : goldenrod
+    "#75c0c0",  # Cancer       — water / Moon         : sea glass
+    "#e67e22",  # Leo          — fire / Sun           : regal orange
+    "#3a6f5f",  # Virgo        — earth / Mercury      : forest teal
+    "#c77d99",  # Libra        — air / Venus          : mauve rose
+    "#7b1538",  # Scorpio      — water / Mars, Pluto  : deep maroon
+    "#6b3fa0",  # Sagittarius  — fire / Jupiter       : royal purple
+    "#6b4226",  # Capricorn    — earth / Saturn       : dark amber
+    "#2ba6cb",  # Aquarius     — air / Saturn, Uranus : electric blue
+    "#4a9d82",  # Pisces       — water / Jupiter, Nep : sea green
 ]
 
 # Pale, ethereal body palette — every color sits around HSL(·, 60%, 85%)
@@ -97,6 +97,96 @@ BODY_COLORS = {
     "Pluto":   "#dfd3fb",  # pale lilac
 }
 
+# Small city gazetteer for the "orient globe at location" text input.
+# Not a full geocoder — just a lookup of ~50 well-known places so
+# the user can type "sydney" or "tokyo" and have the globe swing to
+# center on it. Lowercase key, (lat, lon) in degrees.
+CITIES: dict[str, tuple[float, float]] = {
+    "london":         (51.51,   -0.13),
+    "paris":          (48.86,    2.35),
+    "berlin":         (52.52,   13.41),
+    "madrid":         (40.42,   -3.70),
+    "rome":           (41.90,   12.50),
+    "amsterdam":      (52.37,    4.90),
+    "copenhagen":     (55.68,   12.57),
+    "stockholm":      (59.33,   18.07),
+    "helsinki":       (60.17,   24.94),
+    "dublin":         (53.35,   -6.26),
+    "edinburgh":      (55.95,   -3.19),
+    "reykjavik":      (64.15,  -21.94),
+    "moscow":         (55.76,   37.62),
+    "istanbul":       (41.01,   28.98),
+    "cairo":          (30.04,   31.24),
+    "dubai":          (25.20,   55.27),
+    "mumbai":         (19.08,   72.88),
+    "delhi":          (28.61,   77.21),
+    "bangkok":        (13.76,  100.50),
+    "singapore":      ( 1.35,  103.82),
+    "kuala lumpur":   ( 3.14,  101.69),
+    "jakarta":        (-6.21,  106.85),
+    "manila":         (14.60,  120.98),
+    "seoul":          (37.57,  126.98),
+    "tokyo":          (35.68,  139.65),
+    "beijing":        (39.90,  116.40),
+    "hong kong":      (22.32,  114.17),
+    "shanghai":       (31.23,  121.47),
+    "sydney":         (-33.87, 151.21),
+    "melbourne":      (-37.81, 144.96),
+    "perth":          (-31.95, 115.86),
+    "brisbane":       (-27.47, 153.02),
+    "hobart":         (-42.88, 147.33),
+    "wellington":     (-41.29, 174.78),
+    "auckland":       (-36.85, 174.76),
+    "honolulu":       ( 21.31, -157.86),
+    "anchorage":      ( 61.22, -149.90),
+    "vancouver":      ( 49.28, -123.12),
+    "san francisco":  ( 37.77, -122.42),
+    "los angeles":    ( 34.05, -118.24),
+    "chicago":        ( 41.88,  -87.63),
+    "toronto":        ( 43.65,  -79.38),
+    "new york":       ( 40.71,  -74.01),
+    "mexico city":    ( 19.43,  -99.13),
+    "lima":           (-12.05,  -77.04),
+    "rio de janeiro": (-22.91,  -43.17),
+    "buenos aires":   (-34.61,  -58.38),
+    "cape town":      (-33.92,   18.42),
+    "johannesburg":   (-26.20,   28.05),
+    "nairobi":        ( -1.29,   36.82),
+    "lagos":          (  6.52,    3.38),
+}
+
+
+def _match_city(text: str) -> tuple[float, float] | None:
+    """Case-insensitive substring match against CITIES. Returns the
+    first hit as (lat, lon) or None."""
+    if not text:
+        return None
+    needle = text.strip().lower()
+    if not needle:
+        return None
+    if needle in CITIES:
+        return CITIES[needle]
+    for name, coords in CITIES.items():
+        if needle in name or name.startswith(needle):
+            return coords
+    return None
+
+
+# Traditional astrological / astronomical glyphs for each body, shown
+# next to the name in the positions table.
+BODY_SYMBOLS = {
+    "Sun":     "☉",
+    "Moon":    "☽",
+    "Mercury": "☿",
+    "Venus":   "♀",
+    "Mars":    "♂",
+    "Jupiter": "♃",
+    "Saturn":  "♄",
+    "Uranus":  "♅",
+    "Neptune": "♆",
+    "Pluto":   "♇",
+}
+
 # Dark palette used consistently across map, legend, and page chrome.
 # Slightly bluer/darker than pure slate for a more cosmic feel.
 BG       = "#060a16"  # near-black, hint of navy
@@ -110,32 +200,90 @@ FG       = "#e6edf7"
 # Data access
 # ---------------------------------------------------------------------------
 
-# ─── DEMO [Hour 3]: @st.cache_resource — memoises an OBJECT (singleton) ─────
-# EphemerisLoader opens file handles and keeps its own LRU cache of recently-
-# read monthly chunks. We do NOT want to rebuild it on every rerun. @st.cache_
-# resource guarantees ONE instance per server process, shared across reruns
-# and across users. Use it for DB connections, ML model weights, loaders —
-# anything with internal state you want shared.
+# =============================================================================
+# CACHING LAYER 1 — @st.cache_resource: memoise a long-lived OBJECT
+# =============================================================================
 #
-# Contrast with portwatch's @st.cache_data on load_data:
-#   • cache_data   → memoises a VALUE (pickled, copied per caller). For data.
-#   • cache_resource → memoises a THING (identity, shared). For objects.
-# The question to ask yourself: "is this a DataFrame/dict/list, or a THING
-# with internal state?" That picks the decorator.
+# Remember the core Streamlit rule: every widget interaction reruns the whole
+# script from line 1 to the end. Without caching, that would mean rebuilding
+# our EphemerisLoader on every click — reopening file handles, reparsing the
+# metadata JSON, throwing away the internal chunk cache. The app would be
+# unusable.
+#
+# @st.cache_resource says: "run this function exactly ONCE per server process,
+# keep the return value forever, give the same instance to every caller."
+# It does NOT pickle, it does NOT copy — every rerun sees the exact same
+# Python object by identity. That's what we want for a loader, because the
+# loader has internal state (its own LRU cache of recently-read monthly
+# chunks) that we want to persist.
+#
+# Use cache_resource for:
+#   • database connections / connection pools
+#   • ML model weights loaded into memory
+#   • file-handle-wrapping loaders (like this one)
+#   • anything expensive to construct that should be shared
+#
+# Contrast with the other decorator, @st.cache_data (see portwatch/app.py
+# load_data). cache_data memoises a VALUE — a DataFrame, a list, a dict. The
+# return value is pickled and each caller gets their own copy, safe to mutate.
+#
+# The decision rule is one question:
+#
+#     Is the return value DATA (DataFrame/dict/list/array)?  →  cache_data
+#     Or is it a THING with internal state (connection/loader/model)?  →  cache_resource
+#
+# If you pick wrong: cache_data will try to pickle your loader, fail, and
+# crash. cache_resource will return a shared DataFrame that any caller can
+# accidentally mutate, corrupting it for everyone else.
 @st.cache_resource
 def get_loader() -> EphemerisLoader:
     """Binary ephemeris loader — cached across reruns (it holds chunks in RAM)."""
     return EphemerisLoader(DATA_DIR)
 
 
-# ─── DEMO [Hour 3]: @st.cache_data + the UNDERSCORE-ARG GOTCHA ──────────────
-# cache_data memoises the return value. It decides cache hits by HASHING the
-# arguments. An EphemerisLoader instance can't be hashed (file handles),
-# so without the underscore you'd get UnhashableParamError at first call.
-# The leading underscore on `_loader` is a Streamlit convention — it tells
-# cache_data "don't hash this argument." The cache key becomes just
-# (dt_iso, window_hours, n_samples). This is THE most common "my cache
-# doesn't work" question — write "_ = skip hashing" on the board.
+# =============================================================================
+# CACHING LAYER 2 — @st.cache_data: memoise a derived RESULT
+#                   + the underscore-argument rule
+# =============================================================================
+#
+# body_tracks computes, for a given instant, the path each body sweeps across
+# the Earth's surface over a window of time (e.g. a 24-hour window centred on
+# `dt`). It's not free — 240 samples, each requiring an ephemeris lookup and
+# some trig. If we recomputed it on every widget interaction the app would
+# feel sluggish.
+#
+# @st.cache_data says: "hash the arguments, and if you've already computed a
+# result for this exact set of arguments, return the cached copy instead of
+# running the function again." On a cache hit the function body never runs.
+#
+# BUT — and this is the gotcha every Streamlit student hits at least once —
+# cache_data builds its cache key by HASHING the arguments. Look at the first
+# argument below: `_loader`. An EphemerisLoader cannot be hashed (there's no
+# sensible way to turn an open file handle into a number). If we wrote
+# `loader` instead of `_loader`, the very first call would crash with
+# UnhashableParamError.
+#
+# The leading underscore is a Streamlit convention — not a Python one — and
+# it is LOAD-BEARING. It tells cache_data: "do not try to hash this argument,
+# pretend it is not part of the cache key." The effective cache key for this
+# function is therefore just (dt_iso, window_hours, n_samples). The loader
+# still gets passed in; cache_data just ignores it for cache-key purposes.
+#
+# That's safe here because there is only one loader per process (it's behind
+# @st.cache_resource above), so "the loader" is always the same instance —
+# we aren't hiding a real dependency from the cache.
+#
+# The one-line rule to remember:
+#
+#     underscore prefix = skip this arg when hashing
+#
+# Prefix any un-hashable argument this way: connections, loaders, open files,
+# class instances, anything custom. This is THE most common "why is my cache
+# broken?" question in all of Streamlit.
+#
+# Note the second argument is `dt_iso: str`, not `dt: datetime`. Datetimes
+# are hashable, so that isn't forced, but taking an ISO string gives us a
+# stable, human-readable cache key that's easy to inspect when debugging.
 @st.cache_data(show_spinner=False)
 def body_tracks(
     _loader: EphemerisLoader,
@@ -189,25 +337,21 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-      /* Hide only the Deploy button / main menu — LEAVE Streamlit's
-         header intact, because the sidebar collapse/expand toggle
-         lives inside it and hiding the header was taking the toggle
-         with it. Small price of a thin header bar is worth having
-         the sidebar always reachable. */
-      div[data-testid="stToolbar"]    { display: none !important; }
-      #MainMenu                       { display: none !important; }
-      footer                          { visibility: hidden; }
-      /* Make sure the collapsed-sidebar indicator (the chevron that
-         appears when the sidebar is closed) is always visible. */
-      [data-testid="collapsedControl"] { display: block !important; }
+      /* Kill Streamlit's entire sticky header — it was floating over
+         the "Ephemeris → Earth" title. Safe now that all controls
+         are in the main page body (no sidebar toggle to preserve). */
+      header[data-testid="stHeader"] { display: none !important; }
+      div[data-testid="stToolbar"]   { display: none !important; }
+      #MainMenu                      { display: none !important; }
+      footer                         { visibility: hidden; }
 
       /* With the header gone, pull the main column right up to the
          top of the viewport so the map starts where the eye expects. */
       div.block-container {
-          padding-top: 0.6rem;
-          padding-bottom: 1rem;
-          padding-left: 1.5rem;
-          padding-right: 1.5rem;
+          padding-top: 0.2rem;
+          padding-bottom: 0.6rem;
+          padding-left: 1.2rem;
+          padding-right: 1.2rem;
       }
       /* Compress all heading margins — the tiny gaps between h3 and
          the next element add up fast in a dense dashboard. */
@@ -221,55 +365,6 @@ st.markdown(
       section[data-testid="stSidebar"] .stButton > button {
           padding: 0.25rem 0.25rem;
           font-size: 0.85rem;
-      }
-      /* Compact global title bar — spans full width, fixed 40px,
-         title on the left and current moment + overlay pills on the
-         right. Sets the "app" frame without wasting vertical space. */
-      .app-bar {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          padding: 0.45rem 0.9rem;
-          background: linear-gradient(90deg, #0a1226 0%, #0c1631 100%);
-          border: 1px solid #1e2d4d;
-          border-radius: 10px;
-          margin-bottom: 0.9rem;
-      }
-      .app-bar .app-title {
-          font-size: 0.95rem;
-          font-weight: 600;
-          letter-spacing: 0.02em;
-          color: #e6edf7;
-          display: flex; align-items: center; gap: 0.45rem;
-      }
-      .app-bar .app-title .glyph { font-size: 1.1rem; }
-      .app-bar .app-meta {
-          font-size: 0.82rem;
-          color: #8392b0;
-          font-variant-numeric: tabular-nums;
-      }
-      .app-bar .app-meta b { color: #e6edf7; font-weight: 600; }
-      .app-bar .pill {
-          display: inline-block;
-          padding: 0.08rem 0.6rem;
-          margin-left: 0.45rem;
-          border: 1px solid #2a3859;
-          border-radius: 999px;
-          color: #cbd5e1;
-          font-size: 0.75rem;
-      }
-
-      /* Pane headers — small, muted, uppercase labels for each column
-         so everything lines up at the same baseline. */
-      .pane-title {
-          font-size: 0.68rem;
-          letter-spacing: 0.12em;
-          text-transform: uppercase;
-          color: #8392b0;
-          margin: 0 0 0.4rem 0;
-          padding-bottom: 0.35rem;
-          border-bottom: 1px solid #1e2d4d;
-          height: 22px;
       }
 
       /* Custom legend column that sits between the table and the
@@ -309,6 +404,170 @@ st.markdown(
 
       /* Compact control strip at the bottom: trim widget spacing. */
       .control-strip-top { margin-top: 0.4rem; }
+
+      /* Date / time / text inputs — force visible foreground and
+         a dark surface so the text doesn't blend into the
+         background in light themes. */
+      div[data-testid="stDateInput"] input,
+      div[data-testid="stTimeInput"] input,
+      div[data-testid="stTextInput"] input {
+          background-color: #0e1628 !important;
+          color: #e6edf7 !important;
+          border: 1px solid #2a3859 !important;
+      }
+      div[data-testid="stDateInput"] input::placeholder,
+      div[data-testid="stTextInput"] input::placeholder {
+          color: #6b7a9a !important;
+      }
+
+      /* Compact step buttons in the bottom control strip (but NOT
+         the play buttons above the slider — those stay full size). */
+      .st-key-bottom_ctrl .stButton > button {
+          padding: 0.18rem 0.35rem !important;
+          font-size: 0.72rem !important;
+          min-height: 1.7rem !important;
+          height: 1.7rem !important;
+      }
+      .st-key-bottom_ctrl div[data-testid="stSelectbox"] label,
+      .st-key-bottom_ctrl div[data-testid="stSlider"] label {
+          display: none;
+      }
+
+      /* Pull the zodiac/rising toggle container UP so it sits just
+         below the last legend entry (Pisces) at the bottom-right
+         of the plot area, and shift it right to align with the
+         legend box's left edge (which hangs ~115 px in from the
+         right edge of the map column). Also shrink its checkboxes
+         via the nested rules below. */
+      .st-key-key_toggles {
+          margin-top: -68px !important;
+          margin-right: -8px !important;
+          position: relative;
+          z-index: 20;
+          transform: translateX(12px);
+      }
+      .st-key-key_toggles div[data-testid="stCheckbox"] label {
+          font-size: 0.68rem !important;
+          gap: 0.25rem !important;
+      }
+      .st-key-key_toggles div[data-testid="stCheckbox"] label > div:first-child {
+          transform: scale(0.78);
+          transform-origin: left center;
+          margin-right: 0.15rem !important;
+      }
+
+      /* Tight stack for the zodiac/rising toggles under the legend.
+         Streamlit wraps each checkbox in ~20 px of vertical padding
+         + 8 px of gap by default — we strip all of that so the two
+         boxes together cost ~36 px instead of ~80 px, which brings
+         the slider bar back up above the fold. */
+      div[data-testid="stCheckbox"] {
+          margin: 0 !important;
+          padding: 0 !important;
+      }
+      div[data-testid="stCheckbox"] label {
+          padding: 0 !important;
+          gap: 0.35rem !important;
+          font-size: 0.78rem !important;
+          line-height: 1.0 !important;
+      }
+      div[data-testid="stCheckbox"] label > div:first-child {
+          margin-right: 0.3rem !important;
+      }
+      /* And squeeze the block-level wrapper Streamlit puts around
+         every widget so the two checkboxes sit almost flush. */
+      div[data-testid="stCheckbox"] + div[data-testid="stCheckbox"] {
+          margin-top: -4px !important;
+      }
+
+      /* Force readable button styling — Streamlit's default in some
+         themes renders as white-on-white, which was the complaint.
+         Dark navy surface, pale foreground, subtle border; primary
+         (active) buttons get a bright amber fill on dark text so the
+         ◀ / ▶ play buttons are obviously "on". */
+      .stButton > button,
+      button[data-testid="stBaseButton-secondary"] {
+          background-color: #1e2d4d !important;
+          color: #e6edf7 !important;
+          border: 1px solid #2a3859 !important;
+          font-weight: 500 !important;
+      }
+      .stButton > button:hover,
+      button[data-testid="stBaseButton-secondary"]:hover {
+          background-color: #2a3859 !important;
+          border-color: #4b5d85 !important;
+          color: #ffffff !important;
+      }
+      .stButton > button[kind="primary"],
+      button[data-testid="stBaseButton-primary"] {
+          background-color: #fbbf24 !important;
+          color: #0b1220 !important;
+          border: 1px solid #fbbf24 !important;
+          font-weight: 700 !important;
+      }
+      .stButton > button[kind="primary"]:hover,
+      button[data-testid="stBaseButton-primary"]:hover {
+          background-color: #f59e0b !important;
+          border-color: #f59e0b !important;
+          color: #0b1220 !important;
+      }
+
+      /* Night-themed positions table — dark cells, light hairlines
+         ("wiring") between them, muted uppercase header. */
+      div[data-testid="stDataFrame"] {
+          background-color: #080f1e;
+          border: 1px solid #1e2d4d;
+      }
+      div[data-testid="stDataFrame"] thead tr th {
+          background-color: #080f1e !important;
+          color: #8392b0 !important;
+          font-weight: 600 !important;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+          font-size: 0.7rem !important;
+          border-bottom: 1px solid #2a3859 !important;
+      }
+      div[data-testid="stDataFrame"] tbody tr td {
+          border-color: #1e2d4d !important;
+      }
+
+      /* Cosmic page background — deep navy radial that hints at a
+         starfield without being literal. Applied to the root app
+         container so it sits behind everything Streamlit renders. */
+      [data-testid="stAppViewContainer"] {
+          background:
+            radial-gradient(ellipse at 20% 0%, #1a2950 0%, #0a1128 28%, #05080f 60%, #000000 100%) !important;
+      }
+      [data-testid="stAppViewContainer"] * { color: #e6edf7; }
+      section[data-testid="stSidebar"] { background: #060a16 !important; }
+
+      /* Horizontal legend strip beneath the map. */
+      .legend-horiz {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 0.6rem 1.1rem;
+          justify-content: center;
+          padding: 0.5rem 0.75rem;
+          margin-top: 0.4rem;
+          background: rgba(14, 22, 40, 0.85);
+          border: 1px solid #2a3859;
+          border-radius: 8px;
+          font-size: 0.78rem;
+          color: #cbd5e1;
+      }
+      .legend-horiz .lh-item { display: inline-flex; align-items: center; gap: 0.35rem; }
+      .legend-horiz .lh-sw {
+          width: 10px; height: 10px; border-radius: 50%;
+          display: inline-block;
+      }
+
+      /* Make st.container(border=True) panels match the legend & map
+         borders so every panel's outer edge lines up vertically. */
+      div[data-testid="stVerticalBlockBorderWrapper"] {
+          border-color: #2a3859 !important;
+          background: rgba(14, 22, 40, 0.55) !important;
+          border-radius: 8px !important;
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -343,29 +602,89 @@ if "anchor_dt" not in st.session_state:
     st.session_state.anchor_dt = _init
     st.session_state.d_input = _init.date()
     st.session_state.t_input = _init.time().replace(microsecond=0)
-if "scrub_h" not in st.session_state:
-    st.session_state.scrub_h = 0.0
+    st.session_state.slider_dt = _init
+# Auto-play state: None (paused), "forward", or "backward".
+if "play_dir" not in st.session_state:
+    st.session_state.play_dir = None
+# Globe center — (lat, lon). Default leaves the view as-was.
+if "globe_center" not in st.session_state:
+    st.session_state.globe_center = (20.0, 0.0)
+if "location_query" not in st.session_state:
+    st.session_state.location_query = ""
+
+
+def _on_location_change() -> None:
+    hit = _match_city(st.session_state.location_query)
+    if hit is not None:
+        st.session_state.globe_center = hit
+
+
+def _toggle_play(direction: str) -> None:
+    """Click the ◀ / ▶ button — toggles auto-play in that direction.
+    Clicking the already-active direction stops it."""
+    st.session_state.play_dir = None if st.session_state.play_dir == direction else direction
+
+
+# ---------------------------------------------------------------------------
+# Auto-play advance — MUST run before the slider widget renders
+# ---------------------------------------------------------------------------
+# Streamlit raises a silent error if you mutate a widget's session-state
+# key after the widget has already rendered in the same run, so we tick
+# slider_dt here at the top, then at the very end of the script we
+# call st.rerun() to trigger the next tick. The script body in between
+# reads the new slider_dt normally and everything refreshes.
+if st.session_state.play_dir is not None:
+    _wh = st.session_state.get("window_hours", 168)
+    _half_td = timedelta(hours=_wh / 2)
+    _smin = st.session_state.anchor_dt - _half_td
+    _smax = st.session_state.anchor_dt + _half_td
+    # ~100 ticks across the full window → 12-second sweep at 0.12 s/tick.
+    _tick_td = timedelta(minutes=max(1, int(round(_wh * 60 / 100))))
+    cur = st.session_state.slider_dt
+    if st.session_state.play_dir == "forward":
+        nxt = cur + _tick_td
+    else:
+        nxt = cur - _tick_td
+
+    if nxt > _smax or nxt < _smin:
+        # Overflowed the window — instead of stopping, slide the
+        # whole window so the new moment lands at its centre. The
+        # date/time inputs follow the anchor too.
+        st.session_state.anchor_dt = nxt
+        st.session_state.slider_dt = nxt
+        st.session_state.d_input = nxt.date()
+        st.session_state.t_input = nxt.time().replace(microsecond=0)
+    else:
+        st.session_state.slider_dt = nxt
+
+    # Stop only if we've run off the end of the whole ephemeris
+    # coverage, not just the current window.
+    _cov_end = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+    _cov_start = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+    if st.session_state.slider_dt >= _cov_end or st.session_state.slider_dt <= _cov_start:
+        st.session_state.play_dir = None
 
 
 def _shift(delta: timedelta) -> None:
-    """Jump anchor_dt by `delta` (via the step buttons) and reset the
-    scrub slider so it re-centers on the new anchor."""
+    """Jump anchor_dt by `delta` (via the step buttons) and re-center
+    the scrub slider on the new anchor."""
     new = st.session_state.anchor_dt + delta
     st.session_state.anchor_dt = new
     st.session_state.d_input = new.date()
     st.session_state.t_input = new.time().replace(microsecond=0)
-    st.session_state.scrub_h = 0.0
+    st.session_state.slider_dt = new
 
 
 def _sync_from_widgets() -> None:
     """Called when the user edits Date or Time directly — anchor jumps,
-    scrub resets."""
-    st.session_state.anchor_dt = datetime.combine(
+    slider re-centers."""
+    new = datetime.combine(
         st.session_state.d_input,
         st.session_state.t_input,
         tzinfo=timezone.utc,
     )
-    st.session_state.scrub_h = 0.0
+    st.session_state.anchor_dt = new
+    st.session_state.slider_dt = new
 
 
 # ---------------------------------------------------------------------------
@@ -427,50 +746,77 @@ show_zodiac_band = st.session_state["show_zodiac_band"]
 show_rising      = st.session_state["show_rising"]
 
 # Clamp the scrub slider to the current window so widening/narrowing
-# the window doesn't leave scrub_h out of range.
-_half = window_hours / 2.0
-if st.session_state.scrub_h < -_half:
-    st.session_state.scrub_h = -_half
-elif st.session_state.scrub_h > _half:
-    st.session_state.scrub_h = _half
+# the window doesn't leave it out of range.
+_half = timedelta(hours=window_hours / 2.0)
+_slider_min_global = st.session_state.anchor_dt - _half
+_slider_max_global = st.session_state.anchor_dt + _half
+if "slider_dt" not in st.session_state:
+    st.session_state.slider_dt = st.session_state.anchor_dt
+elif st.session_state.slider_dt < _slider_min_global:
+    st.session_state.slider_dt = _slider_min_global
+elif st.session_state.slider_dt > _slider_max_global:
+    st.session_state.slider_dt = _slider_max_global
 
-# Effective moment: anchor shifted by the scrub offset.
-dt = st.session_state.anchor_dt + timedelta(hours=float(st.session_state.scrub_h))
+# Effective moment: whatever the scrub slider is pointing at.
+dt = st.session_state.slider_dt
 
 
 # ---------------------------------------------------------------------------
-# Global title bar — compact, spans full width, sits above everything
+# Title row — one simple line, no fancy HTML
 # ---------------------------------------------------------------------------
-_window_label = {6: "6 h", 24: "24 h", 72: "3 d", 168: "7 d", 720: "30 d"}[int(window_hours)]
-_meta_pills = f'<span class="pill">{layer}</span>'
-if layer == "Body tracks":
-    _meta_pills += f'<span class="pill">{_window_label}</span>'
-
+# Plain Streamlit markdown beats custom flex CSS for reliability. Two
+# columns: title on the left, current-moment readout on the right.
+_title_cols = st.columns([3, 2])
+_title_cols[0].markdown("### 🌍  Ephemeris → Earth")
+_title_cols[1].markdown(
+    f"<div style='text-align:right; padding-top:0.55rem; color:#8392b0; font-size:0.95rem;'>"
+    f"<b style='color:#e6edf7;'>{dt.strftime('%Y-%m-%d %H:%M')}</b> UTC · "
+    f"{dt.strftime('%A')}"
+    + "</div>",
+    unsafe_allow_html=True,
+)
 st.markdown(
-    f"""
-    <div class="app-bar">
-      <div class="app-title"><span class="glyph">🌍</span> Ephemeris → Earth</div>
-      <div class="app-meta">
-        <b>{dt.strftime('%Y-%m-%d %H:%M')}</b> UTC · {dt.strftime('%A')}
-        {_meta_pills}
-      </div>
-    </div>
-    """,
+    "<hr style='margin:0.2rem 0 0.8rem 0; border-color:#1e2d4d;'>",
     unsafe_allow_html=True,
 )
 
-TABLE_COL, LEGEND_COL, MAP_COL = st.columns([1.2, 0.5, 1.6], gap="small")
+TABLE_COL, MAP_COL = st.columns([1.5, 2.5], gap="small")
 
 
-# ─── DEMO [Hour 3]: the lazy-load moment ────────────────────────────────────
-# This is where 46 MB on disk becomes ~128 KB in RAM. loader.get(dt) reads
-# ONE monthly chunk file (the one containing dt), keeps it in the loader's
-# internal dict (hard-capped at 12 chunks, LRU eviction), and returns one
-# row. Change the date but stay in the same month → zero disk I/O, cache hit.
-# Change to a new month → one 128 KB file read. You never pay more than
-# ~1.5 MB of RAM even after running the app all day. This is the "Streamlit
-# caches the entry point; your code does its own smart paging underneath"
-# pattern.
+# =============================================================================
+# CACHING LAYER 3 — lazy load under the Streamlit layer
+# =============================================================================
+#
+# This line is where 46 MB of ephemeris data on disk becomes ~128 KB in RAM.
+# Watch what actually happens:
+#
+#   1. The user picks a date in the widgets above. `dt` is a Python datetime.
+#   2. loader.get(dt) computes which month `dt` falls in.
+#   3. If that month's chunk is already in the loader's internal dict → cache
+#      hit inside the loader → zero disk I/O, return one row.
+#   4. If not → read ONE monthly binary file (~128 KB) off disk, store it in
+#      the dict, evict the oldest entry if the dict already holds 12, return
+#      one row.
+#
+# So: changing the date but staying within the same month costs nothing.
+# Jumping to a new month costs one 128 KB file read. The process never holds
+# more than ~12 × 128 KB ≈ 1.5 MB of chunk data in memory, no matter how long
+# the app runs or how many dates the user clicks through.
+#
+# This is the headline pattern for large-data Streamlit apps:
+#
+#     Streamlit caches the entry point.
+#     Your code does its own smart paging underneath.
+#
+# @st.cache_resource on get_loader() guarantees exactly one EphemerisLoader
+# per server process. That loader owns its own per-month LRU cache. Streamlit
+# knows nothing about that internal cache — it just trusts the loader to be
+# fast on repeated calls. Two complementary caching layers, collaborating.
+#
+# If the data were too big for even this pattern, you'd move it behind a
+# query engine (DuckDB + Parquet, or a warehouse like Postgres/BigQuery),
+# wrap the connection in @st.cache_resource, and wrap individual query
+# results in @st.cache_data. Same architecture, different storage layer.
 # ---------------------------------------------------------------------------
 # Fetch the entry for the selected moment (bail out cleanly if missing)
 # ---------------------------------------------------------------------------
@@ -502,10 +848,7 @@ for name, lon_key, lat_key in BODIES:
 # KPI stack, cutting ~200px of vertical chrome so the map fits inside
 # a default laptop viewport without scrolling.
 
-_window_label = {6: "6 h", 24: "24 h", 72: "3 d", 168: "7 d", 720: "30 d"}[int(window_hours)]
-_meta_pills = f'<span class="pill">{layer}</span>'
-if layer == "Body tracks":
-    _meta_pills += f'<span class="pill">window {_window_label}</span>'
+_meta_pills = ""  # overlay / window pills removed from the title bar
 
 # (Header moved to the global title bar above.)
 
@@ -556,6 +899,10 @@ if show_rising:
         mask = sign_idx == i
         if not mask.any():
             continue
+        # showlegend=False: the rising-sign grid reuses the same 12
+        # colours as the Zodiac band, which are already in the legend.
+        # Duplicating them as "↑ Aries" etc. doubled the legend and
+        # made it jump when the user toggled Rising signs.
         fig.add_trace(go.Scattergeo(
             lat=grid_lats[mask],
             lon=grid_lons[mask],
@@ -563,8 +910,7 @@ if show_rising:
             marker=dict(size=6, color=SIGN_COLORS[i], opacity=0.35, line=dict(width=0)),
             name=f"↑ {sign}",
             hovertemplate="%{lat:.0f}°, %{lon:.0f}°<br>Rising: " + sign + "<extra></extra>",
-            legendgroup="rising",
-            legendgrouptitle_text="Rising sign" if i == 0 else None,
+            showlegend=False,
         ))
 
 # Overlay: subpoint tracks with a time-fading trail.
@@ -578,7 +924,9 @@ if show_rising:
 # per-vertex opacity, so a multi-trace segmentation is the only way
 # to get a smooth alpha gradient.
 TRAIL_HOURS = 24.0
-N_TRAIL_SEGMENTS = 8
+# More segments = finer opacity gradient. 16 gives a visibly smooth
+# fade from transparent to full-opacity along the ~24 h trail.
+N_TRAIL_SEGMENTS = 16
 _n_samples_total = 240
 track_arrays: dict[str, tuple[np.ndarray, np.ndarray]] = {}
 _trail_samples = 0
@@ -623,12 +971,13 @@ if layer == "Body tracks":
         lons = np.array([p[1] for p in pts], dtype=float)
         track_arrays[name] = (lats, lons)
 
-        # Static view trail = the _trail_samples points centered on dt
-        # (window midpoint). Animation frames will slide this window
-        # to the tail ending at each frame's moment.
-        center_idx = len(lats) // 2
-        start = max(0, center_idx - _trail_samples // 2)
-        end = min(len(lats), start + _trail_samples)
+        # Static view trail = the most-recent _trail_samples points
+        # ENDING at the "now" index (middle of the body_tracks span,
+        # which corresponds to dt). That way the line is purely the
+        # past, and its head sits exactly under the planet marker.
+        now_idx = len(lats) // 2
+        end = now_idx + 1
+        start = max(0, end - _trail_samples)
         trail_indices[name] = []
         seg_bounds = _segment_bounds(start, end, N_TRAIL_SEGMENTS)
         # Always emit exactly N_TRAIL_SEGMENTS traces per body so the
@@ -646,18 +995,80 @@ if layer == "Body tracks":
                 line=dict(color=BODY_COLORS[name], width=1.8),
                 opacity=_segment_alpha(si),
                 name=name,
-                showlegend=(si == N_TRAIL_SEGMENTS - 1),
+                # Real track segments never appear in the legend — a
+                # dedicated dot-style "legend proxy" trace below does
+                # that so the legend symbol matches the Now marker.
+                showlegend=False,
                 legendgroup=name,
                 hoverinfo="skip",
             ))
             trail_indices[name].append(len(fig.data) - 1)
 
-# Overlay: day/night terminator — great circle 90° from the subsolar
-# point. Also drop a marker at the antisolar point (local midnight).
+        # Legend proxy — one invisible point at (nan, nan) per body,
+        # drawn as a solid dot with the body's color + white outline.
+        # Plotly renders this in the legend exactly as it's drawn in
+        # the figure, so the legend entry matches the "Now" marker.
+        fig.add_trace(go.Scattergeo(
+            lat=[None], lon=[None], mode="markers",
+            marker=dict(
+                size=11,
+                color=BODY_COLORS[name],
+                line=dict(color="#ffffff", width=1.5),
+            ),
+            name=name,
+            legendgroup=name,
+            showlegend=True,
+            hoverinfo="skip",
+        ))
+
+# Overlay: day/night. The terminator line is a great circle 90° from
+# the subsolar point. To light up the whole day hemisphere (not just
+# draw the boundary), we also rasterise a dense lat/lon grid and
+# keep every point whose angular distance to the subsolar point is
+# < 90°. Those points get a pale-yellow scatter wash that visibly
+# brightens half the globe; the antisolar marker sits at the darkest
+# point of night for reference.
 if layer == "Day / night":
     sun = next((s for s in subpoints if s[0] == "Sun"), None)
     if sun is not None:
         sun_lat, sun_lon = sun[1], sun[2]
+
+        # Day-hemisphere wash — sample a 3°×3° grid and keep every
+        # cell within 90° great-circle distance of the subsolar
+        # point. 60×120 = 7200 cells; about half survive, which
+        # plotly renders fast as a single scatter trace.
+        _ws_lats = np.arange(-87.0, 87.1, 3.0)
+        _ws_lons = np.arange(-177.0, 177.1, 3.0)
+        _lon_g, _lat_g = np.meshgrid(_ws_lons, _ws_lats)
+        _phi1 = np.deg2rad(sun_lat)
+        _phi2 = np.deg2rad(_lat_g)
+        _dlam = np.deg2rad(_lon_g - sun_lon)
+        _cos_d = (
+            np.sin(_phi1) * np.sin(_phi2)
+            + np.cos(_phi1) * np.cos(_phi2) * np.cos(_dlam)
+        )
+        _day_mask = _cos_d > 0.0
+        # Fade the wash near the terminator so the transition is
+        # soft instead of a hard cutoff. cos_d goes from 1 at sub-
+        # solar to 0 at the terminator; we map that to an opacity
+        # curve peaking in the middle of the day side.
+        _alpha = np.clip(_cos_d[_day_mask], 0.0, 1.0) ** 0.6
+        fig.add_trace(go.Scattergeo(
+            lat=_lat_g[_day_mask],
+            lon=_lon_g[_day_mask],
+            mode="markers",
+            marker=dict(
+                size=9,
+                color="#fef3c7",
+                opacity=_alpha.tolist(),
+                line=dict(width=0),
+            ),
+            name="Day side",
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+
+        # Terminator line itself — a dotted amber great circle.
         term_lats, term_lons = terminator(sun_lat, sun_lon)
         fig.add_trace(go.Scattergeo(
             lat=term_lats, lon=term_lons, mode="lines",
@@ -749,20 +1160,19 @@ _now_marker_index = len(fig.data) - 1
 # action stays in view as you step through time.
 geo_kwargs = dict(
     projection_type=_projection_type,
-    showcoastlines=True,  coastlinecolor="#4b5d85", coastlinewidth=0.6,
-    showland=True,        landcolor=SURFACE,
-    showocean=True,       oceancolor=BG,
+    showcoastlines=True,  coastlinecolor="#334773", coastlinewidth=0.6,
+    showland=True,        landcolor="#0b1220",
+    showocean=True,       oceancolor="#03070f",
     showlakes=False,
-    showcountries=True,   countrycolor="#223353",  countrywidth=0.4,
+    showcountries=True,   countrycolor="#1a253f",  countrywidth=0.4,
     showframe=False,
-    bgcolor=BG,
+    bgcolor="#03070f",
 )
 if _projection_type == "orthographic":
-    # Rotate so the current subsolar longitude faces the camera — the
-    # view follows the action as you step through time.
-    sun_sub = next((s for s in subpoints if s[0] == "Sun"), None)
-    center_lon = sun_sub[2] if sun_sub else 0.0
-    geo_kwargs["projection_rotation"] = dict(lon=center_lon, lat=20, roll=0)
+    # Rotation center — set by the location text input below the
+    # table. Default is (20, 0) which looks "Atlantic-centric".
+    _ctr_lat, _ctr_lon = st.session_state.globe_center
+    geo_kwargs["projection_rotation"] = dict(lon=_ctr_lon, lat=_ctr_lat, roll=0)
 else:
     geo_kwargs["lataxis_range"] = [-80, 80]
     geo_kwargs["lonaxis_range"] = [-180, 180]
@@ -773,28 +1183,48 @@ fig.update_geos(**geo_kwargs)
 # orthographic globe naturally wants a square canvas. Plotly can't
 # measure the column directly, so we pick a fixed height that looks
 # roughly square on a standard monitor.
-_map_height = 520
-_bottom_margin = 6
+# Taller map; the stacked zodiac/rising checkboxes under the key
+# are compressed via CSS (see .compact-checks below) so they barely
+# add any vertical height.
+_map_height = 540
+_bottom_margin = 2
 
 # Legend placement: overlaid in the top-right of the map plot area so
 # it doesn't eat vertical space. Semi-transparent background so the
 # ocean still shows through.
 fig.update_layout(
     height=_map_height,
-    margin=dict(l=0, r=0, t=6, b=_bottom_margin),
-    paper_bgcolor=BG,
-    plot_bgcolor=BG,
-    dragmode="zoom",
+    # Top margin leaves headroom for Plotly's modebar icons so they
+    # don't overlap the globe. Right margin makes space for the
+    # vertical legend that hangs just outside the plot area.
+    margin=dict(l=0, r=110, t=42, b=_bottom_margin),
+    paper_bgcolor="#03070f",
+    plot_bgcolor="#03070f",
+    # "pan" on an orthographic projection = drag-to-rotate the
+    # globe. Scroll-wheel zoom is still off (see the config dict on
+    # st.plotly_chart below), so the page still scrolls when the
+    # mouse is over the map — no accidental flipping from that.
+    dragmode="pan",
     legend=dict(
         orientation="v",
-        yanchor="top",   y=0.98,
-        xanchor="right", x=0.99,
-        bgcolor="rgba(11,18,32,0.75)",
+        yanchor="top",   y=1.0,
+        xanchor="left",  x=1.01,  # just outside the plot area, to the right
+        bgcolor="rgba(3,7,15,0.85)",
         bordercolor=BORDER,
         borderwidth=1,
-        font=dict(color=FG, size=11),
+        # 9-px font + zero tracegroupgap + constant item sizing means
+        # each row is about 16 px tall, so 22 rows fit in ~360 px —
+        # comfortably inside the 540 px plot area.
+        font=dict(color=FG, size=9),
+        itemsizing="constant",
+        tracegroupgap=0,
     ),
-    showlegend=False,  # legend lives in its own middle column now
+    # uirevision pinned to the current globe center: drag-rotations
+    # and pinch-zooms persist across data updates, but when the
+    # user types a new location the revision string changes and
+    # Plotly snaps to the new projection_rotation.
+    uirevision=f"solar-{st.session_state.globe_center[0]:.2f}-{st.session_state.globe_center[1]:.2f}",
+    showlegend=(layer == "Body tracks" or show_zodiac_band),
 )
 
 # ---------------------------------------------------------------------------
@@ -802,132 +1232,255 @@ fig.update_layout(
 # ---------------------------------------------------------------------------
 
 with TABLE_COL:
-    st.markdown('<div class="pane-title">Positions</div>', unsafe_allow_html=True)
     rows = []
     for name, sub_lat, sub_lon, ecl_lon in subpoints:
         rows.append({
-            "Body":       name,
+            "Body":       f"{BODY_SYMBOLS.get(name, '')}  {name}",
             "Ecliptic λ": f"{ecl_lon:7.3f}°",
             "Zodiac":     zodiac_sign_name(ecl_lon),
             "Sub-lat":    f"{sub_lat:+6.2f}°",
             "Sub-lon":    f"{sub_lon:+7.2f}°",
         })
-    st.dataframe(rows, hide_index=True, use_container_width=True, height=360)
+    _df = pd.DataFrame(rows)
 
+    # Dark, night-themed cell for any column we aren't coloring by
+    # body/zodiac. Thin lighter "wiring" border between cells.
+    DARK_CELL = (
+        "background-color: #0a1124; color: #e6edf7;"
+        " border: 1px solid #1e2d4d;"
+    )
 
-# --- Custom HTML legend in the middle column -------------------------------
-# Plotly's built-in legend sits inside the figure frame; the user asked
-# to pull it out between the table and the globe. We build it as a
-# styled HTML block that lists only the overlays currently active.
-with LEGEND_COL:
-    st.markdown('<div class="pane-title">Key</div>', unsafe_allow_html=True)
-    legend_items: list[str] = []
-    if layer == "Body tracks":
-        legend_items.append('<div class="legend-section">Bodies</div>')
-        for bname, _, _ in BODIES:
-            color = BODY_COLORS[bname]
-            legend_items.append(
-                f'<div class="legend-row">'
-                f'<span class="legend-swatch" style="background:{color};"></span>'
-                f'<span class="legend-label">{bname}</span>'
-                f'</div>'
-            )
-    if show_zodiac_band:
-        if legend_items:
-            legend_items.append('<div class="legend-gap"></div>')
-        legend_items.append('<div class="legend-section">Zodiac</div>')
-        for i, sign in enumerate(ZODIAC_SIGNS):
-            legend_items.append(
-                f'<div class="legend-row">'
-                f'<span class="legend-swatch" style="background:{SIGN_COLORS[i]};"></span>'
-                f'<span class="legend-label">{ZODIAC_SYMBOLS[i]} {sign}</span>'
-                f'</div>'
-            )
-    if show_rising:
-        if legend_items:
-            legend_items.append('<div class="legend-gap"></div>')
-        legend_items.append('<div class="legend-section">Rising</div>')
-        for i, sign in enumerate(ZODIAC_SIGNS):
-            legend_items.append(
-                f'<div class="legend-row">'
-                f'<span class="legend-swatch" style="background:{SIGN_COLORS[i]};opacity:0.5;"></span>'
-                f'<span class="legend-label">↑ {sign}</span>'
-                f'</div>'
-            )
-    if not legend_items:
-        legend_items.append('<div class="legend-section">—</div>')
-    st.markdown(
-        '<div class="legend-box">' + ''.join(legend_items) + '</div>',
-        unsafe_allow_html=True,
+    def _style_row(row: pd.Series) -> list[str]:
+        # Body cell is "☉  Sun" etc. — split off the glyph to look
+        # up the color (and fall back to a whole-cell lookup just
+        # in case the glyph is missing).
+        body_name = row["Body"].split()[-1] if row["Body"] else ""
+        body_col = BODY_COLORS.get(body_name) or BODY_COLORS.get(row["Body"], "")
+        try:
+            sign_col = SIGN_COLORS[ZODIAC_SIGNS.index(row["Zodiac"])]
+        except (ValueError, IndexError):
+            sign_col = ""
+        body_cell = (
+            f"background-color: {body_col}; color: #0b1220; font-weight: 700;"
+            f" border: 1px solid #1e2d4d;"
+            if body_col else DARK_CELL
+        )
+        sign_cell = (
+            f"background-color: {sign_col}; color: #ffffff; font-weight: 700;"
+            f" border: 1px solid #1e2d4d;"
+            if sign_col else DARK_CELL
+        )
+        return [body_cell, DARK_CELL, sign_cell, DARK_CELL, DARK_CELL]
+
+    # st.dataframe renders headers on a canvas, so CSS on `thead th`
+    # can't reach them. Workaround: attach the header styles via
+    # pandas Styler.set_table_styles(), emit full HTML via
+    # styled.to_html(), and render with st.markdown — giving us
+    # total control over every thead/tbody/td rule.
+    styled = (
+        _df.style
+           .hide(axis="index")
+           .apply(_style_row, axis=1)
+           .set_table_styles([
+               # Outer frame — dark surface, thin border "wiring".
+               {"selector": "",
+                "props": [
+                    ("border-collapse", "collapse"),
+                    ("border", "1px solid #1e2d4d"),
+                    ("width", "100%"),
+                    ("background-color", "#080f1e"),
+                    ("font-variant-numeric", "tabular-nums"),
+                    ("font-size", "0.85rem"),
+                ]},
+               # Header row — silver background with near-black
+               # text so the column labels read as the distinct
+               # "metal strip" at the top of a dark table.
+               {"selector": "thead th",
+                "props": [
+                    ("background-color", "#c6cfe0"),
+                    ("color", "#0b1220"),
+                    ("font-weight", "700"),
+                    ("text-transform", "uppercase"),
+                    ("letter-spacing", "0.08em"),
+                    ("font-size", "0.7rem"),
+                    ("padding", "0.5rem 0.7rem"),
+                    ("text-align", "left"),
+                    ("border-bottom", "1px solid #2a3859"),
+                    ("border-right", "1px solid #8892a8"),
+                ]},
+               # Body cells — padding + numeric alignment for the
+               # position columns.
+               {"selector": "tbody td",
+                "props": [
+                    ("padding", "0.35rem 0.7rem"),
+                    ("border", "1px solid #1e2d4d"),
+                ]},
+           ])
+    )
+    with st.container(border=True):
+        st.markdown(styled.to_html(), unsafe_allow_html=True)
+
+    # --- Inputs directly under the table -------------------------------
+    # Date / time / location — the "big move" controls live here so
+    # the bottom control strip only needs to hold the step buttons
+    # and the display options.
+    _ti_cols = st.columns([1, 1])
+    _ti_cols[0].date_input(
+        "Date (UTC)",
+        key="d_input",
+        on_change=_sync_from_widgets,
+    )
+    _ti_cols[1].time_input(
+        "Time (UTC)",
+        key="t_input",
+        on_change=_sync_from_widgets,
+        step=3600,
+    )
+    st.text_input(
+        "Center globe on",
+        key="location_query",
+        on_change=_on_location_change,
+        placeholder="e.g. Sydney, New York, Tokyo…",
+        help="Type a city name and hit Enter — the globe swings to that place.",
     )
 
 
 with MAP_COL:
-    st.markdown('<div class="pane-title">View</div>', unsafe_allow_html=True)
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-        config={
-            "scrollZoom": False,
-            "displayModeBar": True,
-            "displaylogo": False,
-            "modeBarButtonsToRemove": [
-                "lasso2d", "select2d", "autoScale2d", "toggleSpikelines",
-                "hoverClosestGeo",
-            ],
-        },
+    map_container = st.container(border=True)
+    with map_container:
+        st.plotly_chart(
+            fig,
+            width="stretch",
+            config={
+                "scrollZoom": True,
+                "displayModeBar": True,
+                "displaylogo": False,
+                "doubleClick": "reset",
+                "modeBarButtonsToRemove": [
+                    "lasso2d", "select2d", "autoScale2d", "toggleSpikelines",
+                    "hoverClosestGeo",
+                ],
+            },
+        )
+        # (Legend is now rendered by Plotly itself on the right edge
+        # of the map — see fig.update_layout(legend=...) above.)
+    # Zodiac / Rising toggles live INLINE with the slider row (see
+    # below) so they don't add vertical space above the slider
+    # bar. Compact CSS on the checkboxes trims their default gap.
+
+    # Streamlit-native scrub slider — a datetime slider flanked by
+    # play-backward / play-forward buttons plus the two zodiac
+    # toggles on the far right under the map's legend. Dragging
+    # the slider reruns; clicking a play button sets play_dir and
+    # the auto-advance block at the top of the file ticks dt.
+    _anchor = st.session_state.anchor_dt
+    _slider_min = _anchor - timedelta(hours=window_hours / 2)
+    _slider_max = _anchor + timedelta(hours=window_hours / 2)
+    _step_minutes = max(1, int(round(window_hours * 60 / 200)))
+    if ("slider_dt" not in st.session_state
+            or st.session_state.slider_dt < _slider_min
+            or st.session_state.slider_dt > _slider_max):
+        st.session_state.slider_dt = _anchor
+    # Zodiac / Rising toggles — floated up into the empty area
+    # below the legend using a negative-margin container. The
+    # st_key class hook lets us target this exact container in
+    # CSS so we can pull it upward into the plot area without
+    # pushing the slider down, and shrink the checkboxes to fit.
+    with st.container(key="key_toggles"):
+        _spacer, _key_toggles = st.columns([6, 1])
+        _key_toggles.checkbox(
+            "Zodiac",
+            key="show_zodiac_band",
+            help="12 colored 30° arcs of the ecliptic on the globe.",
+        )
+        _key_toggles.checkbox(
+            "Rising",
+            key="show_rising",
+            help="Wash each lat/lon by the sign rising on its eastern horizon.",
+        )
+
+    _back_active = (st.session_state.play_dir == "backward")
+    _fwd_active  = (st.session_state.play_dir == "forward")
+    pcols = st.columns([0.12, 1.0, 0.12], gap="small", vertical_alignment="center")
+    pcols[0].button(
+        "◀",
+        key="play_back",
+        on_click=_toggle_play, args=("backward",),
+        type="primary" if _back_active else "secondary",
+        width="stretch",
+        help="Play backward through time — click again to stop.",
     )
-    # Streamlit-native scrub slider. Every drag fires a full rerun,
-    # so the positions table and the map both update in lockstep.
-    st.slider(
-        "Scrub within window (hours from anchor)",
-        min_value=float(-window_hours / 2),
-        max_value=float(window_hours / 2),
-        step=max(0.25, float(window_hours) / 200.0),
-        key="scrub_h",
+    pcols[1].slider(
+        "Moment (UTC)",
+        min_value=_slider_min,
+        max_value=_slider_max,
+        step=timedelta(minutes=_step_minutes),
+        key="slider_dt",
+        format="YYYY-MM-DD HH:mm",
         label_visibility="collapsed",
-        format="%+.2f h",
+    )
+    pcols[2].button(
+        "▶",
+        key="play_fwd",
+        on_click=_toggle_play, args=("forward",),
+        type="primary" if _fwd_active else "secondary",
+        width="stretch",
+        help="Play forward through time — click again to stop.",
     )
 
 
 # ---------------------------------------------------------------------------
 # Compact control strip at the bottom of the page
 # ---------------------------------------------------------------------------
-# All widgets live down here so the top row (table + legend + globe)
-# is uncluttered. Two tight rows: time nav on top, display on bottom.
+# Date/time/location live under the table (left column), so this
+# bottom strip only holds the step buttons + display options. Wrapped
+# in a keyed container so CSS can target .st-key-bottom_ctrl and
+# shrink all its buttons without affecting the play buttons above.
 
 st.markdown('<div class="control-strip-top"></div>', unsafe_allow_html=True)
 
-c1 = st.columns([1.2, 1, 0.6, 0.6, 0.6, 0.2, 0.6, 0.6, 0.6])
-c1[0].date_input("Date (UTC)", key="d_input", on_change=_sync_from_widgets, label_visibility="collapsed")
-c1[1].time_input("Time (UTC)", key="t_input", on_change=_sync_from_widgets, step=3600, label_visibility="collapsed")
-c1[2].button("− 1 mo", on_click=_shift, args=(timedelta(days=-30),), use_container_width=True)
-c1[3].button("− 1 d",  on_click=_shift, args=(timedelta(days=-1),),  use_container_width=True)
-c1[4].button("− 1 h",  on_click=_shift, args=(timedelta(hours=-1),), use_container_width=True)
-c1[6].button("+ 1 h",  on_click=_shift, args=(timedelta(hours=1),),  use_container_width=True)
-c1[7].button("+ 1 d",  on_click=_shift, args=(timedelta(days=1),),   use_container_width=True)
-c1[8].button("+ 1 mo", on_click=_shift, args=(timedelta(days=30),),  use_container_width=True)
+with st.container(key="bottom_ctrl"):
+    c1 = st.columns([1, 1, 1, 0.25, 1, 1, 1])
+    c1[0].button("− 1 mo", on_click=_shift, args=(timedelta(days=-30),), width="stretch")
+    c1[1].button("− 1 d",  on_click=_shift, args=(timedelta(days=-1),),  width="stretch")
+    c1[2].button("− 1 h",  on_click=_shift, args=(timedelta(hours=-1),), width="stretch")
+    c1[4].button("+ 1 h",  on_click=_shift, args=(timedelta(hours=1),),  width="stretch")
+    c1[5].button("+ 1 d",  on_click=_shift, args=(timedelta(days=1),),   width="stretch")
+    c1[6].button("+ 1 mo", on_click=_shift, args=(timedelta(days=30),),  width="stretch")
 
-c2 = st.columns([1, 1, 2, 0.8, 0.8])
-c2[0].selectbox(
-    "Projection",
-    ["Globe", "Natural Earth", "Flat (equirectangular)"],
-    key="projection",
-    label_visibility="collapsed",
-)
-c2[1].selectbox(
-    "Overlay",
-    ["Body tracks", "Day / night", "None"],
-    key="layer",
-    label_visibility="collapsed",
-)
-c2[2].select_slider(
-    "Track window",
-    options=[6, 24, 72, 168, 720],
-    key="window_hours",
-    format_func=lambda h: {6: "6 h", 24: "24 h", 72: "3 d", 168: "7 d", 720: "30 d"}[h],
-    disabled=(layer != "Body tracks"),
-    label_visibility="collapsed",
-)
-c2[3].checkbox("Zodiac band",   key="show_zodiac_band")
-c2[4].checkbox("Rising signs",  key="show_rising")
+    c2 = st.columns([1, 1, 2])
+    c2[0].selectbox(
+        "Projection",
+        ["Globe", "Natural Earth", "Flat (equirectangular)"],
+        key="projection",
+        label_visibility="collapsed",
+    )
+    c2[1].selectbox(
+        "Overlay",
+        ["Body tracks", "Day / night", "None"],
+        key="layer",
+        label_visibility="collapsed",
+    )
+    c2[2].select_slider(
+        "Track window",
+        options=[6, 24, 72, 168, 720],
+        key="window_hours",
+        format_func=lambda h: {6: "6 h", 24: "24 h", 72: "3 d", 168: "7 d", 720: "30 d"}[h],
+        disabled=(layer != "Body tracks"),
+        label_visibility="collapsed",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Auto-play loop driver
+# ---------------------------------------------------------------------------
+# The slider tick already happened at the TOP of the script (before
+# the widget rendered). Here at the bottom we just sleep and trigger
+# another rerun, which lands us back at the top for the next tick.
+# Stopping the loop is just play_dir being toggled back to None by
+# a button click — at that point the top block no-ops and the end
+# block no-ops, so the script runs normally and the loop terminates.
+if st.session_state.play_dir is not None:
+    import time as _time
+    _time.sleep(0.12)
+    st.rerun()
