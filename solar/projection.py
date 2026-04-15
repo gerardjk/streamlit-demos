@@ -20,6 +20,9 @@ ZODIAC_SIGNS = [
     "Libra", "Scorpio", "Sagittarius", "Capricorn", "Aquarius", "Pisces",
 ]
 
+# Unicode glyphs for each sign, same order as ZODIAC_SIGNS.
+ZODIAC_SYMBOLS = ["♈", "♉", "♊", "♋", "♌", "♍", "♎", "♏", "♐", "♑", "♒", "♓"]
+
 # Mean obliquity of the ecliptic — fine to 3 decimals for the modern era.
 OBLIQUITY_DEG = 23.4393
 
@@ -117,6 +120,58 @@ def zodiac_sign_index(longitude_deg) -> int:
 
 def zodiac_sign_name(longitude_deg) -> str:
     return ZODIAC_SIGNS[zodiac_sign_index(longitude_deg)]
+
+
+def ecliptic_sign_arcs(dt: datetime, n_per_sign: int = 16):
+    """
+    Split the ecliptic great circle into 12 subpoint arcs — one per
+    zodiac sign — plus the subpoint of each sign's midpoint for labels.
+
+    Each arc spans 30° of ecliptic longitude and is sampled with
+    `n_per_sign + 1` points so that the end of arc i touches the start
+    of arc i+1 and the band looks continuous.
+
+    Returns:
+        arcs:   list of 12 (lats, lons) tuples, in order Aries → Pisces
+        labels: list of 12 (lat, lon) label anchors at the arc midpoints
+    """
+    arcs: list[tuple[np.ndarray, np.ndarray]] = []
+    labels: list[tuple[float, float]] = []
+    for i in range(12):
+        lon_start = i * 30.0
+        lams = np.linspace(lon_start, lon_start + 30.0, n_per_sign + 1)
+        lats = np.empty(len(lams), dtype=float)
+        lons = np.empty(len(lams), dtype=float)
+        for j, lam in enumerate(lams):
+            lats[j], lons[j] = subpoint(float(lam), 0.0, dt)
+        arcs.append((lats, lons))
+        mid_lat, mid_lon = subpoint(lon_start + 15.0, 0.0, dt)
+        labels.append((mid_lat, mid_lon))
+    return arcs, labels
+
+
+def ecliptic_curve(dt: datetime, n: int = 361):
+    """
+    Subpoint of every ecliptic longitude 0°–360° at the moment `dt`.
+
+    This traces the great circle where the plane of the ecliptic
+    intersects Earth's surface (projected through the zenith). On an
+    equirectangular map it draws a sinusoid with amplitude equal to the
+    current obliquity — every planet's subpoint lies on this curve,
+    because every planet sits on (or very near) the ecliptic.
+    """
+    lams = np.linspace(0.0, 360.0, n, endpoint=True)
+    lats = np.empty(n, dtype=float)
+    lons = np.empty(n, dtype=float)
+    for i, lam in enumerate(lams):
+        lats[i], lons[i] = subpoint(float(lam), 0.0, dt)
+    # Split on antimeridian crossings so plotting libraries draw a clean
+    # line rather than a streak across the whole map.
+    jumps = np.where(np.abs(np.diff(lons)) > 180.0)[0]
+    if len(jumps) > 0:
+        lats = np.insert(lats, jumps + 1, np.nan)
+        lons = np.insert(lons, jumps + 1, np.nan)
+    return lats, lons
 
 
 def rising_sign_grid(dt: datetime, lat_step: float = 4.0, lon_step: float = 4.0):

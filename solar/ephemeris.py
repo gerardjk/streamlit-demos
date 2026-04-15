@@ -2,8 +2,9 @@
 Binary ephemeris loader.
 
 Reads monthly chunk files (ephemeris_YYYY_MM.bin) described by
-ephemeris_metadata.json. Each entry is 140 bytes: one int32 timestamp
-(minutes since 2000-01-01 UTC) followed by 34 float32 fields.
+ephemeris_metadata.json. Each entry is 172 bytes: one int32 timestamp
+(minutes since 2000-01-01 UTC) followed by 42 float32 fields.
+Samples are hourly, so ~744 entries per month, ~128 KB per file.
 Missing values are encoded as -999.0.
 """
 

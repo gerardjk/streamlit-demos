@@ -7,9 +7,9 @@ venv/
 .streamlit/secrets.toml
 .DS_Store
 
-# Solar ephemeris binary data — regenerate with solar/scripts/generate_ephemeris.py
-solar/data/*.bin
-solar/data/*.json
-
-# Skyfield kernel cache
+# Skyfield kernel cache (large, regenerated on demand)
 *.bsp
+*.bsp.download
+
+# Local lecture notes — kept out of the public repo
+LECTURE_TRANSCRIPT.md

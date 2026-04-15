@@ -1,0 +1,46 @@
+portid,portname,country,ISO3,lat,lon,vessel_count_total,vessel_count_tanker,vessel_count_container,vessel_count_dry_bulk,industry_top1,industry_top2,share_country_maritime_export
+port561,Khor Fakkan,United Arab Emirates,ARE,25.35368858,56.36875484,293,178,70,25,Machinery & Electrical Equipment,Vegetable Products,0.5
+port275,Dammam,Saudi Arabia,SAU,26.47626701,50.19439715,1622,35,556,499,Mineral Products,Metals,0.92
+port2025,Khalifa Port,United Arab Emirates,ARE,24.8063011338021,54.6931452546069,2299,95,1675,201,,,3.01
+port1340,Umm al Qaiwain,United Arab Emirates,ARE,25.58810902,55.58024004,127,0,44,1,Mineral Products,Vegetable Products,0.01
+port1089,Ras Al-Khair,Saudi Arabia,SAU,27.54005494,49.18719288,288,97,0,174,Mineral Products,Vegetable Products,1.69
+port563,Khorramshahr,Iran,IRN,30.44360334,48.15439964,154,0,21,5,Mineral Products,Vegetable Products,0.03
+port2237,Das Island,United Arab Emirates,ARE,25.1459398379326,52.8754554358407,335,162,0,0,,,2.22
+port1088,Ras Al Mishab,Saudi Arabia,SAU,27.88827937,48.81709477,17,16,0,0,Mineral Products,Chemical & Allied Industries,0.0
+port196,Bushehr,Iran,IRN,28.99153747,50.83467263,363,47,47,14,Mineral Products,Vegetable Products,1.63
+port20,Al Basrah,Iraq,IRQ,30.55796288,47.79778641,5,0,1,0,Mineral Products,Prepared Foodstuffs & Beverages,0.1
+port13,Ajman,United Arab Emirates,ARE,25.41978684,55.45367849,363,28,259,0,Prepared Foodstuffs & Beverages,Vegetable Products,0.01
+port1342,Doha-Umm Said,Qatar,QAT,24.96358831,51.56713164,1078,406,103,505,Mineral Products,Chemical & Allied Industries,17.56
+port105,Bandar-E Pars Terminal,Iran,IRN,27.56361956,52.51242998,476,202,82,88,Mineral Products,Vegetable Products,45.23
+port108,Bandar Khomeini,Iran,IRN,30.4356647,49.06761425,508,57,49,346,Mineral Products,Vegetable Products,6.77
+port512,Jabal Az Zannah-Ruways,United Arab Emirates,ARE,24.12697586,52.71021364,1379,871,263,201,Mineral Products,Chemical & Allied Industries,18.55
+port745,Port Sultan Qaboos,Oman,OMN,23.62884171,58.56595296,94,54,1,30,Mineral Products,Vegetable Products,0.11
+port2060,Mina Salman,Bahrain,BHR,26.1915358163903,50.6100103379679,113,2,0,4,,,0.01
+port1090,Ras Laffan,Qatar,QAT,25.90850676,51.59049926,1790,1634,8,80,Mineral Products,Chemical & Allied Industries,80.37
+port1117,Al Ruwais,Qatar,QAT,26.14559103,51.20530511,66,1,0,1,Mineral Products,Vegetable Products,0.0
+port2164,Kharg Island,Iran,IRN,29.2430727915583,50.335074434646,91,75,0,1,,,16.34
+port226,Chabahar,Iran,IRN,25.2960398,60.61107983,83,23,24,26,Vegetable Products,Mineral Products,0.71
+port2026,Hamad Port,Qatar,QAT,25.0199084210527,51.6189139089543,1248,3,867,88,,,2.07
+port306,Dubai,United Arab Emirates,ARE,25.27337362,55.290821,1752,389,123,49,Mineral Products,Chemical & Allied Industries,1.89
+port2165,Lavan,Iran,IRN,26.7905436961137,53.3501575546447,53,52,0,1,,,3.19
+port1068,Qalhat LNG Terminal,Oman,OMN,22.65195684,59.41585249,162,120,0,40,Mineral Products,Chemical & Allied Industries,5.09
+port362,Fujairah,United Arab Emirates,ARE,25.20017278,56.35942059,3462,3165,8,267,Mineral Products,Chemical & Allied Industries,19.23
+port25,Shuwaikh,Kuwait,KWT,29.35210588,47.92389677,625,14,264,117,Mineral Products,Vegetable Products,1.31
+port747,Mina Saqr,United Arab Emirates,ARE,25.96728647,56.06305892,1467,116,174,891,Mineral Products,Chemical & Allied Industries,16.48
+port1091,Ras Tanura,Saudi Arabia,SAU,26.67168923,50.12291543,672,672,0,0,Mineral Products,Chemical & Allied Industries,16.0
+port2235,Zirku Island,United Arab Emirates,ARE,24.8851758085943,53.0746754938844,139,0,0,0,,,0.01
+port24,Jubail,Saudi Arabia,SAU,27.05573014,49.6603903,2195,1417,302,383,Mineral Products,Chemical & Allied Industries,13.23
+port72,Sharjah,United Arab Emirates,ARE,25.36312735,55.37623329,1364,501,375,146,Mineral Products,Vegetable Products,1.23
+port743,Mina Al Ahmadi,Kuwait,KWT,29.0455478,48.14514574,509,481,0,26,Mineral Products,Chemical & Allied Industries,75.5
+port2012,Khalifa Bin Salman,Bahrain,BHR,26.2546428806082,50.6789666064565,1,0,0,1,,,0.0
+port5,Abu Dhabi,United Arab Emirates,ARE,24.61243288,54.563683,1103,95,4,143,Mineral Products,Metals,0.53
+port2236,Jebel Dhanna,United Arab Emirates,ARE,24.174505328853,52.5910418293556,144,0,0,0,,,0.0
+port744,Jebel Ali,United Arab Emirates,ARE,24.99941947,55.07781687,7734,1373,4495,464,Mineral Products,Metals,34.39
+port1203,Sitrah,Bahrain,BHR,26.18935646,50.66794163,1495,490,330,412,Mineral Products,Chemical & Allied Industries,99.99
+port2067,Shuaiba,Kuwait,KWT,29.0394783129701,48.1670519806477,1345,289,286,482,,,23.19
+port988,Port of Sohar,Oman,OMN,24.51168743,56.6127179,1967,624,505,544,Mineral Products,Chemical & Allied Industries,40.71
+port106,Bandar Shahid Rajaee,Iran,IRN,27.13960482,56.06282679,958,144,344,144,Mineral Products,Metals,24.89
+port1341,Umm Qasr,Iraq,IRQ,30.1137845,47.90182168,1943,1033,459,174,Mineral Products,Vegetable Products,99.9
+port22,Al Hamriyah LPG Terminal,United Arab Emirates,ARE,25.46752849,55.49501172,1194,979,10,107,Mineral Products,Chemical & Allied Industries,1.92
+port526,Juaymah,Saudi Arabia,SAU,26.80319051,49.97698013,921,920,0,0,Mineral Products,Chemical & Allied Industries,41.4
+port107,Bandar Abbas,Iran,IRN,27.14750008,56.20294512,278,67,17,10,Vegetable Products,Mineral Products,0.66

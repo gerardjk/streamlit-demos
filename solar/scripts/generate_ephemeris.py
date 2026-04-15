@@ -19,7 +19,7 @@ import numpy as np
 from skyfield.api import load
 
 # ============================ CONFIG ============================
-START_YEAR = 2020
+START_YEAR = 2000
 END_YEAR = 2030
 STEP_MINUTES = 60  # hourly cadence; drop to 1 for minute resolution
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "data"
