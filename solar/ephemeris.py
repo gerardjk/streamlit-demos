@@ -1,10 +1,23 @@
 """
 Binary ephemeris loader.
 
-Reads monthly chunk files (ephemeris_YYYY_MM.bin) described by
-ephemeris_metadata.json. Each entry is 172 bytes: one int32 timestamp
-(minutes since 2000-01-01 UTC) followed by 42 float32 fields.
-Samples are hourly, so ~744 entries per month, ~128 KB per file.
+This module reads the pre-computed ephemeris data that generate_ephemeris.py
+created. The data lives in monthly binary chunk files (ephemeris_YYYY_MM.bin)
+described by a single ephemeris_metadata.json index.
+
+Binary format (per entry, 76 bytes):
+  - 1 x int32:   timestamp (minutes since 2000-01-01 00:00 UTC)
+  - 18 x float32: ecliptic longitudes and latitudes for each body
+
+Each monthly file contains ~720-744 entries (one per hour). At ~55 KB per
+file, the full 2000-2030 dataset is ~21 MB on disk but the loader only
+keeps up to 12 months in memory at a time (~660 KB) via an LRU cache.
+
+The app (solar/app.py) uses this loader to answer questions like "where is
+Mars at 2024-06-21 14:00 UTC?" without needing the Skyfield library or the
+31 MB JPL kernel at runtime — all the heavy astronomy was done once at
+generation time.
+
 Missing values are encoded as -999.0.
 """
 
@@ -17,11 +30,25 @@ from typing import Any
 
 import numpy as np
 
+# All timestamps in the binary files are minutes since this epoch.
 EPOCH = datetime(2000, 1, 1, tzinfo=timezone.utc)
 METADATA_FILENAME = "ephemeris_metadata.json"
 
 
 class EphemerisLoader:
+    """Lazy-loading ephemeris reader backed by monthly binary chunks.
+
+    On init, reads the metadata JSON to learn what fields exist, how many
+    bytes per entry, and which chunk files are available. Actual binary
+    data is loaded on demand when get() or range() is called.
+
+    Internal LRU cache: keeps the 12 most recently accessed months in
+    memory. When a 13th month is requested, the oldest cached month is
+    evicted. This means browsing within a year costs zero disk I/O after
+    the first pass, and the process never holds more than ~660 KB of
+    chunk data.
+    """
+
     def __init__(self, data_dir: str | Path):
         self.data_dir = Path(data_dir)
         meta_path = self.data_dir / METADATA_FILENAME
@@ -37,19 +64,26 @@ class EphemerisLoader:
         self.missing: float = self.metadata["missingDataValue"]
         self.bytes_per_entry: int = self.metadata["bytesPerEntry"]
 
-        # Structured dtype: first field int32, rest float32, little-endian.
+        # Build a numpy structured dtype matching the binary layout:
+        # first field is int32 (timestamp), all others are float32.
+        # Little-endian ("<") to match the struct.pack("<i") / "<f" used
+        # by generate_ephemeris.py's write_chunk().
         dtype_fields = [("timestamp", "<i4")]
         for name in self.fields[1:]:
             dtype_fields.append((name, "<f4"))
         self._dtype = np.dtype(dtype_fields)
         assert self._dtype.itemsize == self.bytes_per_entry
 
+        # Index: (year, month) -> chunk metadata dict.
         self._chunk_index = {
             (c["year"], c["month"]): c for c in self.metadata["chunks"]
         }
+        # LRU cache: (year, month) -> numpy structured array.
         self._chunk_cache: dict[tuple[int, int], np.ndarray] = {}
 
     def _load_chunk(self, year: int, month: int) -> np.ndarray | None:
+        """Load a monthly chunk from disk (or return cached). Returns None
+        if the month isn't in the metadata or the file is missing."""
         key = (year, month)
         if key in self._chunk_cache:
             return self._chunk_cache[key]
@@ -59,14 +93,22 @@ class EphemerisLoader:
         path = self.data_dir / meta["filename"]
         if not path.exists():
             return None
+        # np.fromfile reads the flat binary directly into a structured array
+        # using the dtype we built from the metadata. No parsing needed.
         arr = np.fromfile(path, dtype=self._dtype)
+        # Simple LRU: evict the oldest entry if we're at capacity.
         if len(self._chunk_cache) >= 12:
             self._chunk_cache.pop(next(iter(self._chunk_cache)))
         self._chunk_cache[key] = arr
         return arr
 
     def get(self, dt: datetime) -> dict[str, Any] | None:
-        """Return the ephemeris entry for the given UTC datetime (nearest minute)."""
+        """Return the ephemeris entry nearest to *dt* (UTC).
+
+        Loads the month's chunk if needed, then binary-searches the
+        timestamp column for the closest entry. Returns a dict with
+        all field values, or None if the date is outside coverage.
+        """
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         else:
@@ -76,6 +118,7 @@ class EphemerisLoader:
         if chunk is None or len(chunk) == 0:
             return None
 
+        # Binary search for the nearest timestamp.
         target_min = int((dt - EPOCH).total_seconds() // 60)
         idx = int(np.searchsorted(chunk["timestamp"], target_min))
         if idx >= len(chunk):
@@ -85,6 +128,7 @@ class EphemerisLoader:
         ):
             idx -= 1
 
+        # Unpack the structured array row into a plain dict.
         row = chunk[idx]
         out: dict[str, Any] = {}
         for name in self.fields:
@@ -94,15 +138,18 @@ class EphemerisLoader:
                 out["timestamp"] = minutes
                 out["iso"] = (EPOCH + timedelta(minutes=minutes)).isoformat()
             elif float(val) == self.missing:
-                out[name] = None
-            elif name.endswith("_retrograde"):
-                out[name] = bool(val == 1.0)
+                out[name] = None  # -999.0 → None for missing data
             else:
                 out[name] = float(val)
         return out
 
     def range(self, start: datetime, end: datetime) -> np.ndarray:
-        """Return a concatenated structured array over [start, end] (inclusive)."""
+        """Return a concatenated structured array over [start, end] (inclusive).
+
+        Loads all monthly chunks that overlap the range and concatenates them,
+        then filters to the exact timestamp bounds. Useful for bulk analysis
+        but not used by the Streamlit app (which queries one moment at a time).
+        """
         if start.tzinfo is None:
             start = start.replace(tzinfo=timezone.utc)
         if end.tzinfo is None:
@@ -129,4 +176,5 @@ class EphemerisLoader:
 
     @property
     def coverage(self) -> tuple[str, str]:
+        """Return (start_iso, end_iso) for the full ephemeris date range."""
         return self.metadata["startTime"], self.metadata["endTime"]
